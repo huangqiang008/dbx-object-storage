@@ -1,0 +1,13 @@
+# DBX 插件打包配置
+schema_version = 1
+
+# 原生后端（Go Sidecar）：开发宿主据此构建并启动后端进程
+[backend]
+language = "go"
+directory = "backend"
+binary = "backend"
+
+[package]
+include = ["assets", "ui"]
+
+# 前端为静态文件，无需构建步骤；开发宿主直接加载并监听 ui/ 变化
