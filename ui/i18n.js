@@ -67,6 +67,8 @@
       "preview.truncated": "文件过大，仅显示前 2MB",
       "preview.tooLarge": "文件超过预览大小上限（20MB），请下载后查看",
       "preview.unsupported": "该文件类型暂不支持预览",
+      "preview.copy": "复制内容",
+      "preview.copied": "已复制到剪贴板",
       
       "op.download": "下载",
       "op.addr": "获得地址",
@@ -197,6 +199,8 @@
       "preview.truncated": "File too large, showing first 2MB",
       "preview.tooLarge": "File exceeds preview limit (20MB), please download",
       "preview.unsupported": "Preview is not supported for this file type",
+      "preview.copy": "Copy contents",
+      "preview.copied": "Copied to clipboard",
       
       "op.download": "Download",
       "op.addr": "Get URL",

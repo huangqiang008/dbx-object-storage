@@ -19,7 +19,7 @@ import (
 	"sync"
 )
 
-const pluginVersion = "0.4.1"
+const pluginVersion = "0.4.2"
 
 // pluginID 必须与 manifest.json 的 id 完全一致，
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。

@@ -6,7 +6,7 @@
 
   // 构建版本号：与 manifest.json / backend 的 pluginVersion 保持一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查“改了却没生效”）。
-  const BUILD = "0.4.1";
+  const BUILD = "0.4.2";
 
   const state = {
     connectionId: null,
@@ -49,6 +49,7 @@
     pvName: $("pvName"),
     pvMeta: $("pvMeta"),
     pvBody: $("pvBody"),
+    pvCopy: $("pvCopy"),
     pvClose: $("pvClose"),
 
     batchBar: $("batchBar"),
@@ -341,10 +342,22 @@
     copyModal.classList.remove("hidden");
     setTimeout(() => { copyInput.focus(); copyInput.select(); }, 30);
   }
+  // 沙箱下优先走宿主桥接的剪贴板（navigator.clipboard 在 opaque origin 中通常被禁）
+  async function writeClipboard(text) {
+    if (window.dbxPlugin && typeof window.dbxPlugin.copy === "function") {
+      await window.dbxPlugin.copy(text);
+      return;
+    }
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    throw new Error("clipboard unavailable");
+  }
+
   async function copyNow() {
     try {
-      if (window.dbxPlugin.copy) await window.dbxPlugin.copy(copyText);
-      else if (navigator.clipboard) await navigator.clipboard.writeText(copyText);
+      await writeClipboard(copyText);
       copyHint.textContent = I18N.t("modal.copyHint");
     } catch (e) {
       copyInput.select();
@@ -912,7 +925,32 @@
 
   function setPvMeta(text) { els.pvMeta.textContent = text || ""; }
 
+  // 预览复制：仅文本类预览（text/code/markdown）可用，复制的是原始文本
+  let pvCopyText = "";
+
+  function setPvCopyAvailable(on) {
+    if (els.pvCopy) els.pvCopy.classList.toggle("hidden", !on);
+    if (!on) pvCopyText = "";
+  }
+
+  function bindPreviewButtons() {
+    els.pvClose.onclick = closePreview;
+    if (!els.pvCopy) return;
+    els.pvCopy.onclick = async () => {
+      if (!pvCopyText) return;
+      const prev = els.pvMeta.textContent;
+      try {
+        await writeClipboard(pvCopyText);
+        setPvMeta(I18N.t("preview.copied"));
+      } catch (e) {
+        setPvMeta(I18N.t("modal.copyFail"));
+      }
+      setTimeout(() => { setPvMeta(prev); }, 1500);
+    };
+  }
+
   function previewError(msg) {
+    setPvCopyAvailable(false);
     els.pvBody.innerHTML = `<div class="pv-fail">${esc(msg)}</div>`;
   }
 
@@ -927,6 +965,7 @@
     els.pvName.textContent = displayName(it);
     els.pvName.title = it.name;
     els.pvMeta.textContent = "";
+    setPvCopyAvailable(false); // 加载中先隐藏复制按钮，文本类成功后再显示
     els.pvBody.innerHTML = `<div class="pv-loading">${I18N.t("status.loading")}</div>`;
     els.previewOverlay.classList.remove("hidden");
     const sizeText = it.size ? formatSize(it.size) : "";
@@ -979,6 +1018,8 @@
       if (kind === "markdown" || kind === "text") {
         const r = await readObjectText(it.name, PREVIEW_TEXT_CAP);
         setPvMeta(sizeText + (r.truncated ? " · " + I18N.t("preview.truncated") : ""));
+        pvCopyText = r.text;
+        setPvCopyAvailable(true);
         if (kind === "markdown") {
           try {
             await loadScript("https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js");
@@ -1028,7 +1069,7 @@
       .catch(() => {});
   }
 
-  els.pvClose.onclick = closePreview;
+  bindPreviewButtons();
   els.previewOverlay.addEventListener("mousedown", (e) => {
     if (e.target === els.previewOverlay) closePreview();
   });
