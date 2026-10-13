@@ -608,7 +608,9 @@ body {
 .preview-meta { font-size: 12px; color: var(--color-foreground, #18181b); opacity: .6; margin-left: 4px; flex: none; }
 .preview-body {
   flex: 1;
+  min-height: 0;
   overflow: auto;
+  position: relative; /* 文本/MD 预览用绝对定位子元素撑满，不依赖 flex 拉伸（宿主沙箱可能注入覆盖 flex 行为的样式） */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -621,8 +623,8 @@ body {
 .pv-loading, .pv-fail { color: var(--color-foreground, #18181b); opacity: .7; font-size: 13px; padding: 24px; }
 .pv-fail { color: var(--color-danger, #dc2626); opacity: 1; }
 .pv-code {
-  align-self: stretch;
-  flex: 1;
+  position: absolute;
+  inset: 0;
   margin: 0;
   padding: 14px 16px;
   overflow: auto;
@@ -635,8 +637,8 @@ body {
 }
 .pv-code code { font: inherit; white-space: pre; }
 .pv-md {
-  align-self: stretch;
-  flex: 1;
+  position: absolute;
+  inset: 0;
   overflow: auto;
   padding: 18px 24px;
   background: var(--color-background, #fff);

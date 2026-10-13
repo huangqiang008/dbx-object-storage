@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.object.browser",
   "name": "Object Storage",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "huangqiang",
   "description": "Browse and read/write Alibaba Cloud OSS, MinIO and other S3-compatible object storage, with large-directory pagination and list virtualization.",
   "icon": "assets/plugin.svg",

@@ -5,3 +5,4 @@ bin/
 vendor/
 # dev 宿主运行时数据（含明文凭据，严禁提交）
 .dbx-dev/
+store-submission/

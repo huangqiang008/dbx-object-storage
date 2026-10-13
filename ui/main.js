@@ -6,7 +6,7 @@
 
   // 构建版本号：与 manifest.json / backend 的 pluginVersion 保持一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查“改了却没生效”）。
-  const BUILD = "0.4.0";
+  const BUILD = "0.4.1";
 
   const state = {
     connectionId: null,
