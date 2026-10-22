@@ -137,6 +137,8 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleObjectsGetAcl(req.Params)
 	case "objects/set_acl":
 		return handleObjectsSetAcl(req.Params)
+	case "objects/get_acl_batch":
+		return handleObjectsGetAclBatch(req.Params)
 	case "upload/begin":
 		return handleUploadBegin(req.Params)
 	case "upload/chunk":

@@ -43,6 +43,10 @@ body {
 .toolbar button:hover svg { opacity: 1; }
 .toolbar button:active { background: var(--color-border, #e4e4e7); }
 .toolbar button:hover:active { box-shadow: inset 0 1px 2px rgba(0, 0, 0, .06); }
+/* 「公开状态」开关：开启时高亮，提示当前正在扫描 / 显示公共读徽标 */
+.toolbar button.toggle.on { background: var(--color-primary, #2563eb); color: #fff; }
+.toolbar button.toggle.on svg { opacity: 1; }
+.toolbar button.toggle.on:hover { background: var(--color-primary, #2563eb); filter: brightness(1.06); }
 #connBtn {
   color: var(--color-primary, #2563eb);
   background: rgba(37, 99, 235, .08);
@@ -347,6 +351,23 @@ body {
 .ico-text { color: #64748b; }
 .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nm.is-dir { color: var(--color-primary, #2563eb); cursor: pointer; }
+/* 公共读徽标：标记已设为公共读的对象，便于一眼识别哪些可被任何人访问 */
+.pub-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-left: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  white-space: nowrap;
+}
+.pub-badge svg { width: 11px; height: 11px; display: block; }
 .sz, .tm { color: var(--color-foreground, #18181b); opacity: .7; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 图标不参与命中：点击目标始终是 .op/.ico/.fast/.ctx-item 宿主元素，避免 svg target 吞掉 data-act */
 .ico svg, .fast .op svg, .ctx-item svg { pointer-events: none; }
@@ -893,6 +914,16 @@ body {
 /* Office/OFD 预览（file-viewer 挂载容器）：与 pv-code 同理用绝对定位撑满，
    不依赖 flex 拉伸（宿主沙箱可能注入覆盖 flex 行为的样式） */
 .pv-office { position: absolute; inset: 0; }
+/* HTML 渲染预览：沙箱 iframe 撑满（srcdoc 注入，脚本在不透明源运行）。
+   白底与浏览器默认画布一致 */
+.pv-html {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
 /* 3D 模型预览（Online3DViewer 挂载容器）：同上，绝对定位撑满供 canvas 自适应。
    overflow:hidden 消除画布与容器的亚像素级溢出导致的滚动条；
    canvas 强制块级，消除 inline 基线间隙（约 4px）造成的多余高度 */

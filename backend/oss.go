@@ -25,7 +25,7 @@ import (
 // pluginVersion 必须与 manifest.json 的 version 及 ui/main.js 的 BUILD 一致。
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。
 // v0.2.0 起由 com.aliyun.oss.browser 改为通用 ID（阿里云 OSS / MinIO / S3 兼容）。
-const pluginVersion = "1.1.0"
+const pluginVersion = "1.1.2"
 
 // pluginID 必须与 manifest.json 的 id 完全一致，
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。
@@ -696,6 +696,50 @@ func handleObjectsSetAcl(params json.RawMessage) (interface{}, *RPCError) {
 		return nil, &RPCError{Code: -32000, Message: "设置对象权限失败: " + e.Error()}
 	}
 	return map[string]interface{}{"public": p.Public}, nil
+}
+
+// ---------- objects/get_acl_batch（批量读取对象 ACL，用于列表徽标） ----------
+//
+// 列表页需要标出哪些对象已是公共读。逐对象调 get_acl 会产生 N 次 RPC 与 N 次
+// 服务端 API 调用；这里合并为一次 RPC，后端内部顺序读取（阿里云 / MinIO 均无批量
+// ACL 接口）。读取失败的单条以 public=false 兜底——徽标「漏标」远好过「把私有
+// 误标为公开」，且失败不影响其余对象。
+type ObjectAclBatchParams struct {
+	Bucket string   `json:"bucket"`
+	Paths  []string `json:"paths"`
+}
+
+type AclItem struct {
+	Path   string `json:"path"`
+	Public bool   `json:"public"`
+}
+
+func handleObjectsGetAclBatch(params json.RawMessage) (interface{}, *RPCError) {
+	var p ObjectAclBatchParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &RPCError{Code: -32602, Message: "invalid params"}
+	}
+	if len(p.Paths) == 0 {
+		return map[string]interface{}{"items": []AclItem{}}, nil
+	}
+	d, rerr := getDriver()
+	if rerr != nil {
+		return nil, rerr
+	}
+	items := make([]AclItem, 0, len(p.Paths))
+	for _, path := range p.Paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		pub, e := d.GetObjectAcl(p.Bucket, path)
+		if e != nil {
+			// 单条失败：兜底为私有，不中断其余对象
+			items = append(items, AclItem{Path: path, Public: false})
+			continue
+		}
+		items = append(items, AclItem{Path: path, Public: pub})
+	}
+	return map[string]interface{}{"items": items}, nil
 }
 
 // ---------- upload/* 大文件分片上传 ----------

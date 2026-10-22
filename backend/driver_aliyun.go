@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -183,18 +184,94 @@ func (d *aliyunDriver) Presign(bucket, path string, expires int64) (string, erro
 }
 
 // GetObjectAcl 读取对象 ACL，返回是否为公共读。
-// 阿里云 GetObjectACLResult.ACL 取自 XML 的 AccessControlList>Grant，
-// 与对象级 canned ACL 字符串一致（public-read / private / ...）。
+//
+// 为何不直接用 SDK 的 GetObjectACL：该版本 SDK 的返回结构（GetBucketACLResult 别名）
+// 仅含 ACL / Owner 两个字段，根本没有 Grant 列表；且 ACL 字段的 xml tag 是
+// `AccessControlList>Grant`——Go 会把它解析为 <Grant> 元素的文本（而 <Grant> 内只有
+// 子元素 Grantee / Permission），因此 r.ACL 恒为空字符串，永远判定为「非公共读」。
+// 这正是此前「公开后无法取消公开」的根因：get_acl 总是返回 false，前端永远走不到
+// 「恢复私有」分支。
+//
+// 替代方案：匿名（不签名）探测对象是否可被任何人访问。公共读对象允许匿名 GET/HEAD，
+// 返回 2xx；私有对象返回 403。复用了 SDK 的 http.Client（含代理 / 传输设置），
+// 仅去掉签名这一项，最大限度复用既有网络环境，避免探测因环境差异而失败。
 func (d *aliyunDriver) GetObjectAcl(bucket, path string) (bool, error) {
-	b, err := d.bucket(bucket)
-	if err != nil {
-		return false, err
+	return d.probePublic(bucket, path)
+}
+
+// probePublic 匿名探测对象是否可公开访问。
+// 优先用与签名请求相同的 http.Client；优先 virtual-hosted URL，再退到 path-style，
+// 以兼容自定义域名 / CNAME / path-style 端点。仅取首字节（Range bytes=0-0），避免
+// 大对象整文件下载。
+func (d *aliyunDriver) probePublic(bucket, path string) (bool, error) {
+	cfg := d.client.Config
+	ep := normalizeAclEndpoint(cfg.Endpoint)
+	enc := encodeKeySegments(path)
+	var urls []string
+	if cfg.IsCname {
+		// CNAME 自定义域名通常直接绑定到某个桶：https://<ep>/<key>
+		urls = []string{fmt.Sprintf("https://%s/%s", ep, enc)}
+	} else if cfg.IsPathStyle {
+		urls = []string{fmt.Sprintf("https://%s/%s/%s", ep, bucket, enc)}
+	} else {
+		urls = []string{
+			fmt.Sprintf("https://%s.%s/%s", bucket, ep, enc),
+			fmt.Sprintf("https://%s/%s/%s", ep, bucket, enc),
+		}
 	}
-	r, err := b.GetObjectACL(path)
-	if err != nil {
-		return false, err
+	hc := d.client.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 8 * time.Second}
 	}
-	return strings.EqualFold(strings.TrimSpace(r.ACL), string(oss.ACLPublicRead)), nil
+	var lastErr error
+	for _, u := range urls {
+		req, e := http.NewRequest("GET", u, nil)
+		if e != nil {
+			lastErr = e
+			continue
+		}
+		req.Header.Set("Range", "bytes=0-0")
+		resp, e := hc.Do(req)
+		if e != nil {
+			lastErr = e
+			continue // 网络 / 解析错误：尝试下一候选 URL 样式
+		}
+		// 排空并关闭，避免复用连接时残留响应体
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			return true, nil // 2xx（含 206 分片）：匿名可访问 => 公共读
+		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+			return false, nil // 明确拒绝匿名访问 => 私有
+		default:
+			// 404（URL 样式不匹配）等：尝试候选样式，记录最近一次状态
+			lastErr = fmt.Errorf("unexpected status %d for %s", resp.StatusCode, u)
+			continue
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no candidate URL tried for %s/%s", bucket, path)
+	}
+	return false, lastErr
+}
+
+// normalizeAclEndpoint 去除端点的 scheme 与尾部斜杠。
+func normalizeAclEndpoint(ep string) string {
+	ep = strings.TrimSpace(ep)
+	ep = strings.TrimPrefix(ep, "https://")
+	ep = strings.TrimPrefix(ep, "http://")
+	return strings.TrimSuffix(ep, "/")
+}
+
+// encodeKeySegments 按段（以 / 分隔）对对象 key 做路径编码。
+// 必须逐段编码后再用 / 拼接——否则整串编码会把分隔斜杠也转义掉。
+func encodeKeySegments(key string) string {
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // SetObjectAcl 切换对象公共读 / 私有（OSS 支持对象级 ACL，可在线修改）。

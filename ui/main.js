@@ -7,7 +7,7 @@
   // 构建版本号：必须与 manifest.json 的 version 及 backend 的 pluginVersion 一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查"改了却没生效"）。
   // 发版时三处（manifest.json / backend/oss.go / 此处）需一并修改。
-  const BUILD = "1.1.1";
+  const BUILD = "1.1.2";
 
   const state = {
     connectionId: null,
@@ -38,6 +38,13 @@
     // 这是体验层的第一道防线；真正的边界在后端 handler 的 requireWritable 守卫，
     // 前端隐藏只是避免用户点了才报错。
     readOnly: false,
+    // showPublicAcl: 是否在列表里扫描并标出「公共读」对象。默认关闭——
+    // 逐对象读取 ACL 是一次额外服务端 API 调用（见 objects/get_acl_batch），
+    // 打开后会在每次进入目录时扫描当前页，故默认不自动跑，避免无谓的额度消耗。
+    // 用户手动切换对象公开/私有时，行内徽标仍会立即反映（走本地状态，与开关无关）。
+    showPublicAcl: false,
+    // aclKnown: 已查询过 ACL 的对象 key 集合，避免重复扫描同一对象。
+    aclKnown: new Set(),
   };
 
   const $ = (id) => document.getElementById(id);
@@ -161,6 +168,8 @@
     state.hasMore = false;
     state.selectedIndex = -1;
     state.sel.clear();
+    // 进入新目录/新搜索：此前已扫描的 ACL 属于别的目录，作废以便重新扫描
+    state.aclKnown.clear();
     // 作废在途请求：调用方紧接着会 loadPage，不作废的话旧响应会写进新列表
     invalidateList();
     updateBatchUI();
@@ -311,6 +320,9 @@
     els.browserView.classList.remove("hidden");
     applyReadOnlyUI();
     applyColWidths(); // 显示后才能拿到真实表头宽度，据此放置拖拽手柄
+    // 同步「公开状态」开关的视觉态（跨连接保持会话内的开关状态）
+    const pb = $("pubAclBtn");
+    if (pb) pb.classList.toggle("on", !!state.showPublicAcl);
     // 首次进入或从连接对话框返回：作废可能在途的旧请求
     invalidateList();
     renderBreadcrumb();
@@ -356,6 +368,23 @@
       msg(I18N.t("conn.testFail") + (e.message || e), true);
     }
   };
+  // 「公开状态」开关：开启后扫描当前目录并标出公共读对象（见 refreshAcl）。
+  // 关闭则停止扫描；用户手动切换的公开/私有徽标仍会保留。
+  const pubAclBtn = $("pubAclBtn");
+  if (pubAclBtn) {
+    pubAclBtn.onclick = () => {
+      state.showPublicAcl = !state.showPublicAcl;
+      pubAclBtn.classList.toggle("on", state.showPublicAcl);
+      if (state.showPublicAcl) {
+        // 重新扫描：清空已知集合以便把已加载对象重新纳入扫描
+        state.aclKnown.clear();
+        refreshAcl();
+        setStatus(I18N.t("public.scanOn"));
+      } else {
+        setStatus(I18N.t("public.scanOff"));
+      }
+    };
+  }
   els.saveBtn.onclick = doConnect;
   els.fProvider.addEventListener("change", updateProviderUI);
 
@@ -700,6 +729,9 @@
       renderBreadcrumb();
       renderList();
       updateSortIndicators();
+      // 扫描「公共读」徽标（若用户开启了该开关）：仅拉取尚未查过的对象，
+      // 异步进行、不阻塞浏览；出错仅影响徽标，不中断列表。
+      refreshAcl();
       setStatus(state.hasMore
         ? I18N.t("status.loadedMore", { n: state.items.length })
         : I18N.t("status.loaded", { n: state.items.length }));
@@ -1118,7 +1150,8 @@
       if (previewKind(it.name)) acts.push(["preview", "eye", "op.preview"]);
       acts.push(["download", "download", "op.download"]);
       acts.push(["addr", "link", "op.addr"]);
-      acts.push(["public", "globe", "op.public"]);
+      // 公开动作标题随状态变化：已知公开 → 「取消公开」；否则「公开链接」。
+      acts.push(["public", "globe", it.public ? "op.cancelPublic" : "op.public"]);
       acts.push(["name", "copy", "op.name"]);
       acts.push(["detail", "info", "op.detail"]);
       if (canWrite) {
@@ -1268,9 +1301,13 @@
       const selected = i === state.selectedIndex ? " selected" : "";
       const checked = state.sel.has(it.name) ? " checked" : "";
       const ic = itemIcon(it);
+      // 公共读徽标：仅对已确认为公共读的对象（it.public 为 true）显示。
+      // it.public 既来自用户本地的开关操作（即时），也来自「公开状态」扫描
+      // （objects/get_acl_batch）。目录无 ACL，不显示。
+      const pubBadge = (!it.isDir && it.public) ? `<span class="pub-badge" title="${esc(I18N.t("op.publicBadge"))}">${svg("globe", 12)}<span>${esc(I18N.t("op.publicBadge"))}</span></span>` : "";
       html += `<div class="row${selected}${checked}" data-i="${i}" style="position:absolute;top:${i * ROW_H}px;height:${ROW_H}px;left:0;right:0;">` +
         ckboxHtml(it) +
-        `<span class="cell-name"><span class="ico ${ic.cls}">${svg(ic.icon, 16)}</span><span class="nm ${it.isDir ? "is-dir" : ""}">${esc(displayName(it))}</span></span>` +
+        `<span class="cell-name"><span class="ico ${ic.cls}">${svg(ic.icon, 16)}</span><span class="nm ${it.isDir ? "is-dir" : ""}">${esc(displayName(it))}</span>${pubBadge}</span>` +
         `<span class="sz">${it.isDir ? I18N.t("row.dir") : formatSize(it.size)}</span>` +
         `<span class="tm">${esc(fmtTime(it.modified))}</span>` +
         `<span class="fast">${rowOps(it)}</span>` +
@@ -1504,7 +1541,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     if (VID_SET.indexOf(ext) >= 0) return "video";
     if (AUD_SET.indexOf(ext) >= 0) return "audio";
     if (ext === "md" || ext === "markdown") return "markdown";
-    // HTML 单独走 iframe 渲染预览（浏览器式展示，可一键切回源码），不进 text 分支
+    // HTML 单独走 iframe 渲染预览（浏览器式展示，看源码用「编辑」），不进 text 分支
     if (ext === "html" || ext === "htm") return "html";
     if (TEXT_SET.indexOf(ext) >= 0) return "text";
     if (OFFICE_SET.indexOf(ext) >= 0) return "office";
@@ -2348,11 +2385,15 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
         // 文本类且可编辑时显示「编辑」按钮（只读连接 / 超大文件 / 非文本类均不可编辑）
         setEditButtons(canEditCurrent(it), false);
         if (kind === "html") {
-          // HTML 默认浏览器式渲染（沙箱 iframe，脚本可跑但不透明源，碰不到插件页面）；
-          // 顶栏按钮可切回源码视图（高亮）。远程图片/样式受宿主 CSP 限制可能不加载。
-          pvHtmlState = { name: it.name, text: r.text, mode: "render" };
-          setHtmlModeButton(true);
-          renderHtmlView();
+          // HTML 直接 iframe 渲染（srcdoc 注入全文，浏览器式展示）。sandbox 只给
+          // allow-scripts：页面脚本可跑，但处于不透明源，碰不到插件页面与 dbxPlugin 桥
+          //（HTML 是桶里任意对象，不加 sandbox 会同源泄漏连接凭据）。看源码走「编辑」按钮。
+          const frame = document.createElement("iframe");
+          frame.className = "pv-html";
+          frame.setAttribute("sandbox", "allow-scripts");
+          frame.srcdoc = r.text;
+          els.pvBody.innerHTML = "";
+          els.pvBody.appendChild(frame);
           return;
         }
         if (kind === "markdown") {
@@ -2431,47 +2472,106 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     return `https://${state.bucket}.${host}/${key}`;
   }
 
+  // ---------- 公共读状态扫描（列表徽标） ----------
+  // 仅当用户开启「公开状态」开关时运行：合并为单次 RPC（objects/get_acl_batch），
+  // 后端按顺序读取每个对象的 ACL。已查过的对象记入 state.aclKnown，不重复查。
+  // 扫描是异步且尽力而为的——失败只影响徽标、绝不阻塞浏览。
+  let aclScanBusy = false;
+  async function refreshAcl() {
+    if (!state.showPublicAcl || !state.bucket) return;
+    const gen = listGen;
+    const todo = state.items.filter((it) => !it.isDir && !state.aclKnown.has(it.name));
+    if (!todo.length) return;
+    if (aclScanBusy) return; // 防并发
+    aclScanBusy = true;
+    setStatus(I18N.t("public.scanning"));
+    try {
+      const paths = todo.map((it) => it.name);
+      const r = await invoke("objects/get_acl_batch", { bucket: state.bucket, paths });
+      if (gen !== listGen) return; // 目录已切换，丢弃过期结果
+      const map = {};
+      (r && r.items || []).forEach((x) => { map[x.path] = !!x.public; });
+      todo.forEach((it) => {
+        it.public = map[it.name] || false;
+        state.aclKnown.add(it.name);
+      });
+      renderVisible();
+      setStatus(I18N.t("status.loaded", { n: state.items.length }));
+    } catch (e) {
+      setStatus(I18N.t("public.scanFail") + ((e && e.message) ? e.message : ""), true);
+    } finally {
+      aclScanBusy = false;
+    }
+  }
+
   // 公共读：与预签名是两条不同的分享路径。预签名 URL 必然带过期时间（S3 协议上限
   // 7 天），公共读则是把对象 ACL 设为 public-read，用不带签名的普通 URL 访问——
   // 没有过期时间，代价是任何持链接者都能永久访问。因此每次设置都要二次确认，
   // 且只读连接直接拒绝（后端 requireWritable 也会兜底拦一次）。
   //
-  // 流程：先查当前 ACL。已公开 → 询问是否恢复私有（取消则只复制链接）；
-  // 未公开 → 风险确认后设置，成功则展示永久链接。
+  // 关键修复（针对「公开后不能取消」）：取消/设置的走向不再单纯信任每次点击的
+  // get_acl 往返结果，而是优先使用本地已知状态 it.public——用户刚设置过公开的
+  // 对象，本地状态即为 true，再次点击必然进入「恢复私有」分支，即便 get_acl 因
+  // 服务端一致性/字段差异偶发返回 false 也不会卡死。未知状态才回退到 get_acl 查询。
+  //
+  // S3 兼容驱动无法在线改对象 ACL（minio-go 未提供 PutObjectAcl）：该分支只读取
+  // 状态、展示公共链接，并明确告知需到服务商控制台设置，避免给出「设置失败」的
+  // 误导性报错。
   async function doPublic(it) {
     if (!state.bucket) { setStatus(I18N.t("addr.missingEndpoint")); return; }
-    let pub = false;
-    try {
-      const r = await invoke("objects/get_acl", { bucket: state.bucket, path: it.name });
-      pub = !!(r && r.public);
-    } catch (e) {
-      setStatus(I18N.t("public.readFail") + ((e && e.message) ? e.message : ""), true);
+    // 确定当前公开状态：本地已知优先，未知才回退查询。
+    let pub = it.public;
+    if (pub == null) {
+      try {
+        const r = await invoke("objects/get_acl", { bucket: state.bucket, path: it.name });
+        pub = !!(r && r.public);
+      } catch (e) {
+        setStatus(I18N.t("public.readFail") + ((e && e.message) ? e.message : ""), true);
+        return;
+      }
+      it.public = pub;
+      state.aclKnown.add(it.name);
+    }
+
+    // S3 兼容驱动：不支持在线修改，只展示只读说明 / 公共链接。
+    if (state.provider === "s3") {
+      if (pub) {
+        showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
+      } else {
+        setStatus(I18N.t("public.s3ReadOnly"), true);
+      }
       return;
     }
+
+    if (state.readOnly) { setStatus(I18N.t("public.readOnly"), true); return; }
+
     if (pub) {
       const revoke = await openConfirm(I18N.t("public.alreadyTitle"), I18N.t("public.alreadyMsg"));
       if (!revoke) {
         showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
+        renderVisible();
         return;
       }
       try {
         await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: false });
+        it.public = false; // 立即更新本地状态与徽标，无需等待扫描
         setStatus(I18N.t("public.revoked"));
       } catch (e) {
         setStatus(I18N.t("public.setFail") + ((e && e.message) ? e.message : ""), true);
       }
-      return;
+    } else {
+      const ok = await openConfirm(I18N.t("public.confirmTitle"), I18N.t("public.confirmMsg"), it.name);
+      if (!ok) return;
+      try {
+        await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: true });
+        it.public = true; // 立即更新本地状态与徽标
+        setStatus(I18N.t("public.ok"));
+        showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
+      } catch (e) {
+        setStatus(I18N.t("public.setFail") + ((e && e.message) ? e.message : ""), true);
+      }
     }
-    if (state.readOnly) { setStatus(I18N.t("public.readOnly"), true); return; }
-    const ok = await openConfirm(I18N.t("public.confirmTitle"), I18N.t("public.confirmMsg"), it.name);
-    if (!ok) return;
-    try {
-      await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: true });
-      setStatus(I18N.t("public.ok"));
-      showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
-    } catch (e) {
-      setStatus(I18N.t("public.setFail") + ((e && e.message) ? e.message : ""), true);
-    }
+    renderVisible(); // 刷新行内徽标，立即反映最新公开状态
   }
 
   async function doCopyUrl(it) {

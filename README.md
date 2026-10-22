@@ -1,6 +1,6 @@
 # 对象存储 / Object Storage
 
-[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
+[![Version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > DBX 插件：通用对象存储浏览器。一个插件同时支持阿里云 OSS 原生与 S3 兼容协议（MinIO、AWS S3、Cloudflare R2、腾讯 COS、华为 OBS、Backblaze B2 等）。
@@ -30,7 +30,7 @@
 - **断点续传**：上传中途崩溃或被取消后，同一文件再次上传自动从断点继续（分片以 `bucket+key+size` 派生的稳定文件名 + 元数据落盘，跨 sidecar 进程可恢复），超时 24h 的残留自动清理
 - **预签名分享**：一键生成带有效期的 GET URL（60 秒–7 天），失败自动回退拼接地址
 - **公共读链接（永久分享）**：与预签名是两条路径——预签名必然带过期时间（S3 协议上限 7 天），公共读则把对象 ACL 设为 `public-read`，用不带签名、不过期的普通 URL 访问。行操作「公开链接」会先查当前权限：已公开时可选择恢复私有或复制链接，未公开时需二次确认（明示"任何人可永久访问"）。阿里云 OSS 可在线切换；S3 兼容服务受 minio-go 限制不支持在线改 ACL，需在服务商控制台/桶策略配置，插件只负责读取状态与生成链接
-- **文件预览**：图片 / 视频 / 音频 / PDF（iframe）/ 文本 / 代码（highlight.js 高亮）/ Markdown（marked）渲染，超大文件截断保护。代码/Markdown 预览用的 highlight.js 11.9.0（BSD-3-Clause）与 marked 12.0.2（MIT）自 v1.0.0 起**随包本地分发**（`ui/vendor/`，零外联、离线可用），仅当包内资产缺失时才回退 cdnjs；两者都不可用时降级为纯文本。分块读回时写入预分配 `ArrayBuffer`（峰值约为文件大小 1 倍而非 2 倍），Blob URL 在关闭/切换预览时显式 `revokeObjectURL` 释放，避免反复预览大文件撑爆 webview 内存
+- **文件预览**：图片 / 视频 / 音频 / PDF（iframe）/ HTML（沙箱 iframe 渲染，浏览器式展示，源码可经「编辑」查看）/ 文本 / 代码（highlight.js 高亮）/ Markdown（marked）渲染，超大文件截断保护。代码/Markdown 预览用的 highlight.js 11.9.0（BSD-3-Clause）与 marked 12.0.2（MIT）自 v1.0.0 起**随包本地分发**（`ui/vendor/`，零外联、离线可用），仅当包内资产缺失时才回退 cdnjs；两者都不可用时降级为纯文本。分块读回时写入预分配 `ArrayBuffer`（峰值约为文件大小 1 倍而非 2 倍），Blob URL 在关闭/切换预览时显式 `revokeObjectURL` 释放，避免反复预览大文件撑爆 webview 内存
 - **Office / OFD 预览**：doc/docx/rtf/odt、xls/xlsx/ods/dbf、pptx/potx/ppsx、ofd 共 28 个扩展名，经 file-viewer 安全子集（本地 IIFE + 本地 Worker 资产，零外部请求）渲染。授权边界：仅含 Apache-2.0/MIT 组件，已排除 AGPL CAD 与专有水印 ppt 引擎，详见 `ui/THIRD-PARTY-NOTICES.md`
 - **3D 模型预览**：obj/stl/ply/off/3ds/glb/gltf/bim/fbx/dae/wrl/3mf/amf 共 13 个扩展名，经 Online3DViewer 安全子集（本地 IIFE，单实例复用）渲染。授权边界：全链 MIT/Apache-2.0、零 WASM、零外部请求；3dm/ifc/step/iges/brep/fcstd（MPL/LGPL 解码器）与 draco 压缩 glTF 刻意不支持。gltf/obj/dae 引用外部资源时单文件预览会缺资源，.glb/.stl/.ply 最稳
 - **重命名**：行操作内置改名（后端 copy + delete，对象存储无原生 rename）。目录改名保留目录语义与所在前缀，改名前检测同名冲突避免静默覆盖
