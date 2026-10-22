@@ -1,6 +1,6 @@
 # 对象存储 / Object Storage
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > DBX 插件：通用对象存储浏览器。一个插件同时支持阿里云 OSS 原生与 S3 兼容协议（MinIO、AWS S3、Cloudflare R2、腾讯 COS、华为 OBS、Backblaze B2 等）。

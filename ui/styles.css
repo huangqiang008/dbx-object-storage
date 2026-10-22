@@ -461,6 +461,27 @@ body {
   opacity: .7;
   margin-top: 8px;
   white-space: pre-wrap;
+  /* 对象 key 这类无空格长串必须允许任意点断行，否则会撑破 380px 弹窗 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* 对象名等长标识单独一行展示：小号等宽、可断行、超长时内部滚动，
+   避免把确认文案劈成两段（正文保持完整成句）。 */
+.modal-detail {
+  margin-top: 6px;
+  max-height: 5.2em;
+  overflow: auto;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--color-muted, #f4f4f5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-foreground, #18181b);
+  opacity: .75;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 /* 对象详情：宽版弹窗 + 键值网格 */
 .modal-box-wide { width: 520px; }

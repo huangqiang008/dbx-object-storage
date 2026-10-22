@@ -7,7 +7,7 @@
   // 构建版本号：必须与 manifest.json 的 version 及 backend 的 pluginVersion 一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查"改了却没生效"）。
   // 发版时三处（manifest.json / backend/oss.go / 此处）需一并修改。
-  const BUILD = "1.1.0";
+  const BUILD = "1.1.1";
 
   const state = {
     connectionId: null,
@@ -431,6 +431,7 @@
   const modalTitle = modal.querySelector(".modal-title");
   const modalInput = $("modalInput");
   const modalMsg = modal.querySelector(".modal-msg");
+  const modalDetail = modal.querySelector(".modal-detail");
   const modalOk = $("modalOk");
   const modalCancel = $("modalCancel");
   let modalResolve = null;
@@ -450,18 +451,27 @@
       modalInput.value = value || "";
       modalInput.placeholder = placeholder || "";
       modalMsg.textContent = "";
+      setModalDetail("");
       modalOk.textContent = confirmText || I18N.t("modal.ok");
       modal.classList.remove("hidden");
       setTimeout(() => modalInput.focus(), 30);
     });
   }
+  // detail：长标识（对象 key / 路径）单独一行展示。塞进正文会把句子劈成两段，
+  // 且无空格长串的断行位置不可控——所以正文保持完整成句，标识放到这里。
+  function setModalDetail(text) {
+    if (!modalDetail) return;
+    modalDetail.textContent = text || "";
+    modalDetail.classList.toggle("hidden", !text);
+  }
   // 二次确认：返回 true/false
-  function openConfirm(title, message) {
+  function openConfirm(title, message, detail) {
     return new Promise((resolve) => {
       modalResolve = resolve;
       modalTitle.textContent = title;
       modalInput.style.display = "none";
       modalMsg.textContent = message;
+      setModalDetail(detail);
       modalOk.textContent = I18N.t("modal.ok");
       modal.classList.remove("hidden");
     });
@@ -1470,7 +1480,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   const IMG_SET = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "avif"];
   const VID_SET = ["mp4", "webm", "m4v", "mov", "mkv"];
   const AUD_SET = ["mp3", "wav", "ogg", "m4a", "flac", "aac"];
-  const TEXT_SET = ["txt", "md", "csv", "tsv", "log", "rst", "json", "xml", "html", "htm", "js", "mjs", "ts", "tsx", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "cs", "css", "scss", "yml", "yaml", "sh", "bat", "ps1", "sql", "toml", "ini", "proto", "dockerfile", "gitignore"];
+  const TEXT_SET = ["txt", "md", "csv", "tsv", "log", "rst", "json", "xml", "js", "mjs", "ts", "tsx", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "cs", "css", "scss", "yml", "yaml", "sh", "bat", "ps1", "sql", "toml", "ini", "proto", "dockerfile", "gitignore"];
   // file-viewer 安全子集覆盖的格式（本地 IIFE 渲染；授权见 ui/THIRD-PARTY-NOTICES.md）。
   // 与 bundle 内 5 个渲染器的扩展名一一对应；刻意不含 .ppt（ legacy 二进制 PPT 走专有
   // 水印引擎 renderer-ppt，已在授权审查中排除），csv/tsv 保留纯文本预览（在 TEXT_SET 中先行命中）。
@@ -1494,6 +1504,8 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     if (VID_SET.indexOf(ext) >= 0) return "video";
     if (AUD_SET.indexOf(ext) >= 0) return "audio";
     if (ext === "md" || ext === "markdown") return "markdown";
+    // HTML 单独走 iframe 渲染预览（浏览器式展示，可一键切回源码），不进 text 分支
+    if (ext === "html" || ext === "htm") return "html";
     if (TEXT_SET.indexOf(ext) >= 0) return "text";
     if (OFFICE_SET.indexOf(ext) >= 0) return "office";
     if (MODEL3D_SET.indexOf(ext) >= 0) return "model3d";
@@ -1782,12 +1794,12 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   }
 
   // canEditCurrent 判断当前预览对象是否可编辑：
-  // 必须是文本类、不是只读连接、且未超大小上限。
+  // 必须是文本类（含 HTML，以源码形式编辑）、不是只读连接、且未超大小上限。
   function canEditCurrent(it) {
     if (!it) return false;
     if (state.readOnly) return false; // 只读连接禁止写
     const kind = previewKind(it.name);
-    if (kind !== "text" && kind !== "markdown") return false;
+    if (kind !== "text" && kind !== "markdown" && kind !== "html") return false;
     if (it.size > EDIT_MAX_BYTES) return false;
     return true;
   }
@@ -2328,13 +2340,21 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
         }
       }
 
-      if (kind === "markdown" || kind === "text") {
+      if (kind === "markdown" || kind === "text" || kind === "html") {
         const r = await readObjectText(it.name, PREVIEW_TEXT_CAP);
         setPvMeta(sizeText + (r.truncated ? " · " + I18N.t("preview.truncated") : ""));
         pvCopyText = r.text;
         setPvCopyAvailable(true);
         // 文本类且可编辑时显示「编辑」按钮（只读连接 / 超大文件 / 非文本类均不可编辑）
         setEditButtons(canEditCurrent(it), false);
+        if (kind === "html") {
+          // HTML 默认浏览器式渲染（沙箱 iframe，脚本可跑但不透明源，碰不到插件页面）；
+          // 顶栏按钮可切回源码视图（高亮）。远程图片/样式受宿主 CSP 限制可能不加载。
+          pvHtmlState = { name: it.name, text: r.text, mode: "render" };
+          setHtmlModeButton(true);
+          renderHtmlView();
+          return;
+        }
         if (kind === "markdown") {
           try {
             await loadScriptAny(MD_ASSETS.marked);
@@ -2443,7 +2463,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       return;
     }
     if (state.readOnly) { setStatus(I18N.t("public.readOnly"), true); return; }
-    const ok = await openConfirm(I18N.t("public.confirmTitle"), I18N.t("public.confirmMsg", { name: it.name }));
+    const ok = await openConfirm(I18N.t("public.confirmTitle"), I18N.t("public.confirmMsg"), it.name);
     if (!ok) return;
     try {
       await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: true });
@@ -2599,7 +2619,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       const tip = info
         ? I18N.t(info.truncated ? "delete.dirTipTruncated" : "delete.dirTip", { name, n: info.count })
         : I18N.t("delete.dirTipUnknown", { name });
-      const ok = await openConfirm(I18N.t("modal.confirmTitle"), tip);
+      const ok = await openConfirm(I18N.t("modal.confirmTitle"), tip, name);
       if (!ok) return;
       if (info && info.truncated) {
         setStatus(I18N.t("delete.dirTooLarge", { name }), true);
@@ -2621,7 +2641,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       loadPage("");
       return;
     }
-    const ok = await openConfirm(I18N.t("modal.confirmTitle"), I18N.t("delete.fileTip", { name }));
+    const ok = await openConfirm(I18N.t("modal.confirmTitle"), I18N.t("delete.fileTip"), name);
     if (!ok) return;
     try {
       await invoke("objects/delete", { bucket: state.bucket, path: it.name });
