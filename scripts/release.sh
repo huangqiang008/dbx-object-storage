@@ -43,27 +43,34 @@ TMP="$(mktemp)"
   echo "  \"targets\": ["
 } > "$TMP"
 
-first=1
+# 先收集全部包再写：多平台时每个条目末尾需要逗号（最后一个不需要）。
+# 早先的写法是「写下一个条目前补一行 }」，会在多平台时产出重复的 } 导致 JSON 非法，
+# 单平台时恰好不暴露——所以必须先数出总数再决定每个条目的结尾。
+pkgs=()
 for f in "$DIST"/${ID}-${VERSION}-*.dbxp; do
   [ -e "$f" ] || continue
+  pkgs+=("$f")
+done
+total=${#pkgs[@]}
+idx=0
+for f in "${pkgs[@]}"; do
+  idx=$((idx + 1))
   fname="$(basename "$f")"
   target="${fname#"$ID-$VERSION-"}"
   target="${target%.dbxp}"
   sha="$(sha256_of "$f")"
   sz="$(size_of "$f")"
   url="https://github.com/$REPO/releases/download/v$VERSION/$fname"
-  if [ "$first" -eq 0 ]; then echo "    }," >> "$TMP"; fi
-  first=0
   {
     echo "    {"
     echo "      \"target\": \"$target\","
     echo "      \"url\": \"$url\","
     echo "      \"sha256\": \"$sha\","
     echo "      \"size\": $sz"
-    echo "    }"
+    if [ "$idx" -lt "$total" ]; then echo "    },"; else echo "    }"; fi
   } >> "$TMP"
 done
-[ "$first" -eq 0 ] && echo "  ]" >> "$TMP" || echo "  ]" >> "$TMP"
+echo "  ]" >> "$TMP"
 echo "}" >> "$TMP"
 
 mv "$TMP" "$OUT"
