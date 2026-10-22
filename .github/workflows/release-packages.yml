@@ -1,0 +1,112 @@
+name: Package and publish
+
+# 原生 sidecar（Go）必须逐平台本机打包：dbx-plugin package 会拒绝交叉编译
+# （"Native plugin target does not match build host"）。因此每个平台用一个 GitHub
+# runner 当「本机」——Windows / macOS Apple Silicon / macOS Intel 各跑一个 job，
+# 产物汇总后由 publish job 聚合校验值并上传到 GitHub Release。
+#
+# 触发方式：
+#   - push tag v*：自动打包并上传到该 tag 的 Release（不存在则创建）
+#   - workflow_dispatch：手动跑，可选填 release tag（留空则只打包、上传 artifact）
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "上传到哪个 Release（如 v1.0.0）。留空则只打包、不上传"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: macos-14        # Apple Silicon
+            target: darwin-arm64
+          - os: macos-13        # Intel
+            target: darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: 安装 dbx-plugin CLI
+        run: npm install --global @dbx-app/plugin-cli
+        shell: bash
+
+      - name: 版本自检
+        run: dbx-plugin version
+        shell: bash
+
+      # Go 在 macOS 上链接后会自动做 ad-hoc 签名，arm64 可正常启动；
+      # 正式分发建议另做 Developer ID 签名 + 公证（scripts/sign-macos.sh）。
+      - name: 打包 ${{ matrix.target }}
+        run: dbx-plugin package . --target ${{ matrix.target }}
+        shell: bash
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbxp-${{ matrix.target }}
+          path: |
+            dist/*.dbxp
+            dist/*.artifact.json
+          if-no-files-found: error
+
+  publish:
+    name: Aggregate and upload
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dbxp-*
+          merge-multiple: true
+          path: dist
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="${{ inputs.release_tag }}"
+            VER="${VER#v}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: 聚合 sha256 / size
+        run: bash scripts/release.sh
+        shell: bash
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.ver.outputs.version }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" --clobber \
+            dist/*.dbxp \
+            dist/*.artifact.json \
+            store-submission/release-candidates.json
+        shell: bash
