@@ -25,7 +25,7 @@ import (
 // pluginVersion 必须与 manifest.json 的 version 及 ui/main.js 的 BUILD 一致。
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。
 // v0.2.0 起由 com.aliyun.oss.browser 改为通用 ID（阿里云 OSS / MinIO / S3 兼容）。
-const pluginVersion = "1.0.0"
+const pluginVersion = "1.1.0"
 
 // pluginID 必须与 manifest.json 的 id 完全一致，
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。
@@ -648,6 +648,54 @@ func handleObjectsPresign(params json.RawMessage) (interface{}, *RPCError) {
 		return nil, &RPCError{Code: -32000, Message: "预签名失败: " + e.Error()}
 	}
 	return map[string]interface{}{"url": u, "expires": p.Expires}, nil
+}
+
+// ---------- objects/get_acl / objects/set_acl（公共读，无过期分享） ----------
+//
+// 与预签名是两条不同的分享路径：预签名 URL 必然带过期时间（S3 协议上限 7 天），
+// 而「公共读」是把对象 ACL 设为 public-read，用不带签名的普通 URL 访问——
+// 没有过期时间，代价是任何持链接者都能永久访问该对象。因此：
+//   - set_acl 属写操作，只读连接一律拒绝（requireWritable）；
+//   - 前端必须二次确认并明示风险。
+
+type ObjectAclParams struct {
+	Bucket string `json:"bucket"`
+	Path   string `json:"path"`
+	Public bool   `json:"public"` // 仅 set_acl 使用
+}
+
+func handleObjectsGetAcl(params json.RawMessage) (interface{}, *RPCError) {
+	var p ObjectAclParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &RPCError{Code: -32602, Message: "invalid params"}
+	}
+	d, rerr := getDriver()
+	if rerr != nil {
+		return nil, rerr
+	}
+	pub, e := d.GetObjectAcl(p.Bucket, p.Path)
+	if e != nil {
+		return nil, &RPCError{Code: -32000, Message: "读取对象权限失败: " + e.Error()}
+	}
+	return map[string]interface{}{"public": pub}, nil
+}
+
+func handleObjectsSetAcl(params json.RawMessage) (interface{}, *RPCError) {
+	var p ObjectAclParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &RPCError{Code: -32602, Message: "invalid params"}
+	}
+	if rerr := requireWritable(); rerr != nil {
+		return nil, rerr
+	}
+	d, rerr := getDriver()
+	if rerr != nil {
+		return nil, rerr
+	}
+	if e := d.SetObjectAcl(p.Bucket, p.Path, p.Public); e != nil {
+		return nil, &RPCError{Code: -32000, Message: "设置对象权限失败: " + e.Error()}
+	}
+	return map[string]interface{}{"public": p.Public}, nil
 }
 
 // ---------- upload/* 大文件分片上传 ----------

@@ -133,6 +133,10 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleObjectsStat(req.Params)
 	case "objects/presign":
 		return handleObjectsPresign(req.Params)
+	case "objects/get_acl":
+		return handleObjectsGetAcl(req.Params)
+	case "objects/set_acl":
+		return handleObjectsSetAcl(req.Params)
 	case "upload/begin":
 		return handleUploadBegin(req.Params)
 	case "upload/chunk":

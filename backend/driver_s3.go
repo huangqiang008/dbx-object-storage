@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -260,6 +261,37 @@ func (d *s3Driver) Presign(bucket, path string, expires int64) (string, error) {
 		return "", err
 	}
 	return u.String(), nil
+}
+
+// GetObjectAcl 读取对象 ACL，返回是否为公共读。
+// minio-go 的 GetObjectACL 会把服务端返回的 canned ACL 放进 Metadata 的
+// X-Amz-Acl；若服务返回的是完整 Grant 列表（非 canned），则退回到
+// 「AllUsers + READ」的授权项判定（公共读的标准表达）。
+func (d *s3Driver) GetObjectAcl(bucket, path string) (bool, error) {
+	b, err := d.pickBucket(bucket)
+	if err != nil {
+		return false, err
+	}
+	info, err := d.cl.GetObjectACL(context.Background(), b, path)
+	if err != nil {
+		return false, err
+	}
+	if v := info.Metadata.Get("X-Amz-Acl"); v != "" {
+		return strings.EqualFold(strings.TrimSpace(v), "public-read"), nil
+	}
+	for _, g := range info.Grant {
+		if strings.Contains(g.Grantee.URI, "AllUsers") && strings.EqualFold(g.Permission, "READ") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SetObjectAcl S3 兼容侧不支持在线改对象 ACL：minio-go v7 只提供 GetObjectACL，
+// 未提供 PutObjectAcl。公共读需由用户在服务商侧配置（对象 ACL 或桶策略），
+// 插件只负责读取状态与生成不带签名的公共链接。
+func (d *s3Driver) SetObjectAcl(bucket, path string, public bool) error {
+	return errors.New("S3 兼容驱动不支持在线设置对象 ACL（minio-go 未提供 PutObjectAcl）：请在服务商控制台将该对象设为公共读，或配置桶策略后重试")
 }
 
 func (d *s3Driver) Delete(bucket, path string) error {

@@ -1,6 +1,6 @@
 # 对象存储 / Object Storage
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > DBX 插件：通用对象存储浏览器。一个插件同时支持阿里云 OSS 原生与 S3 兼容协议（MinIO、AWS S3、Cloudflare R2、腾讯 COS、华为 OBS、Backblaze B2 等）。
@@ -29,6 +29,7 @@
 - **多文件 / 文件夹上传**：一次选多个文件或整个目录（目录按 `webkitRelativePath` 保留层级），串行上传并汇总成功/失败
 - **断点续传**：上传中途崩溃或被取消后，同一文件再次上传自动从断点继续（分片以 `bucket+key+size` 派生的稳定文件名 + 元数据落盘，跨 sidecar 进程可恢复），超时 24h 的残留自动清理
 - **预签名分享**：一键生成带有效期的 GET URL（60 秒–7 天），失败自动回退拼接地址
+- **公共读链接（永久分享）**：与预签名是两条路径——预签名必然带过期时间（S3 协议上限 7 天），公共读则把对象 ACL 设为 `public-read`，用不带签名、不过期的普通 URL 访问。行操作「公开链接」会先查当前权限：已公开时可选择恢复私有或复制链接，未公开时需二次确认（明示"任何人可永久访问"）。阿里云 OSS 可在线切换；S3 兼容服务受 minio-go 限制不支持在线改 ACL，需在服务商控制台/桶策略配置，插件只负责读取状态与生成链接
 - **文件预览**：图片 / 视频 / 音频 / PDF（iframe）/ 文本 / 代码（highlight.js 高亮）/ Markdown（marked）渲染，超大文件截断保护。代码/Markdown 预览用的 highlight.js 11.9.0（BSD-3-Clause）与 marked 12.0.2（MIT）自 v1.0.0 起**随包本地分发**（`ui/vendor/`，零外联、离线可用），仅当包内资产缺失时才回退 cdnjs；两者都不可用时降级为纯文本。分块读回时写入预分配 `ArrayBuffer`（峰值约为文件大小 1 倍而非 2 倍），Blob URL 在关闭/切换预览时显式 `revokeObjectURL` 释放，避免反复预览大文件撑爆 webview 内存
 - **Office / OFD 预览**：doc/docx/rtf/odt、xls/xlsx/ods/dbf、pptx/potx/ppsx、ofd 共 28 个扩展名，经 file-viewer 安全子集（本地 IIFE + 本地 Worker 资产，零外部请求）渲染。授权边界：仅含 Apache-2.0/MIT 组件，已排除 AGPL CAD 与专有水印 ppt 引擎，详见 `ui/THIRD-PARTY-NOTICES.md`
 - **3D 模型预览**：obj/stl/ply/off/3ds/glb/gltf/bim/fbx/dae/wrl/3mf/amf 共 13 个扩展名，经 Online3DViewer 安全子集（本地 IIFE，单实例复用）渲染。授权边界：全链 MIT/Apache-2.0、零 WASM、零外部请求；3dm/ifc/step/iges/brep/fcstd（MPL/LGPL 解码器）与 draco 压缩 glTF 刻意不支持。gltf/obj/dae 引用外部资源时单文件预览会缺资源，.glb/.stl/.ply 最稳
@@ -154,7 +155,7 @@ node_modules/.bin/esbuild o3dv-src/engine/main.js --bundle --format=iife --globa
 ## 免责声明 / Disclaimer
 
 - **商标**：本插件为独立第三方开发，与文中提及的各服务厂商（Alibaba Cloud、Tencent Cloud、Huawei Cloud、Amazon Web Services、MinIO、Cloudflare、Wasabi、Backblaze 等）**无隶属、代理、赞助或背书关系**；插件中出现的厂商名与服务名仅用于标识所兼容的存储协议，相关商标归各自权利人所有。
-- **数据与凭据**：连接凭据（AccessKeyId / Secret）仅在本机与用户自己的对象存储服务之间使用，插件不向任何第三方上报；Secret 默认不落盘，勾选「在本机记住 Secret」后以明文保存在本机插件存储中，请自行评估。预签名分享链接在有效期内可被任何持有者访问，请勿用于敏感对象。
+- **数据与凭据**：连接凭据（AccessKeyId / Secret）仅在本机与用户自己的对象存储服务之间使用，插件不向任何第三方上报；Secret 默认不落盘，勾选「在本机记住 Secret」后以明文保存在本机插件存储中，请自行评估。预签名分享链接在有效期内可被任何持有者访问，请勿用于敏感对象；「公开链接」会把对象设为公共读，链接永久有效且任何人可访问，可随时用同一操作恢复私有。
 - **运行时外联**：插件默认**零外部请求**——浏览、上传、下载、Office / 3D 预览与 Markdown / 代码高亮全部使用包内资产。仅当包内高亮资产缺失（如被剪枝）时才会回退请求 cdnjs 的 marked / highlight.js。插件无遥测、无数据上报。
 
 ## License

@@ -182,6 +182,34 @@ func (d *aliyunDriver) Presign(bucket, path string, expires int64) (string, erro
 	return b.SignURL(path, oss.HTTPGet, expires)
 }
 
+// GetObjectAcl 读取对象 ACL，返回是否为公共读。
+// 阿里云 GetObjectACLResult.ACL 取自 XML 的 AccessControlList>Grant，
+// 与对象级 canned ACL 字符串一致（public-read / private / ...）。
+func (d *aliyunDriver) GetObjectAcl(bucket, path string) (bool, error) {
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return false, err
+	}
+	r, err := b.GetObjectACL(path)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(strings.TrimSpace(r.ACL), string(oss.ACLPublicRead)), nil
+}
+
+// SetObjectAcl 切换对象公共读 / 私有（OSS 支持对象级 ACL，可在线修改）。
+func (d *aliyunDriver) SetObjectAcl(bucket, path string, public bool) error {
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return err
+	}
+	acl := oss.ACLPrivate
+	if public {
+		acl = oss.ACLPublicRead
+	}
+	return b.SetObjectACL(path, acl)
+}
+
 func (d *aliyunDriver) Delete(bucket, path string) error {
 	b, err := d.bucket(bucket)
 	if err != nil {

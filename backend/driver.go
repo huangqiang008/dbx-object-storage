@@ -265,6 +265,12 @@ type StorageDriver interface {
 	PutFromFile(bucket, path, filePath, mime string) error
 	// Presign 生成预签名 GET URL（对象分享）。expires 秒数由 handler 层钳制。
 	Presign(bucket, path string, expires int64) (string, error)
+	// GetObjectAcl 查询对象是否公共读：public 为 true 表示任何持 URL 者可匿名访问
+	// （预签名 URL 之外的另一条分享路径——公共读链接没有过期时间）。
+	GetObjectAcl(bucket, path string) (public bool, err error)
+	// SetObjectAcl 切换对象公共读 / 私有。这是「永久公开」的开关，与预签名无关，
+	// 因此 handler 层对只读连接直接拒绝；不是所有驱动都支持写 ACL（见各实现）。
+	SetObjectAcl(bucket, path string, public bool) error
 	Delete(bucket, path string) error
 	// DeletePrefix 递归删除 prefix 下的全部对象（含 prefix 自身的目录标记对象），
 	// 返回实际删除的对象数。

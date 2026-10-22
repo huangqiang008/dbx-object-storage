@@ -7,7 +7,7 @@
   // 构建版本号：必须与 manifest.json 的 version 及 backend 的 pluginVersion 一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查"改了却没生效"）。
   // 发版时三处（manifest.json / backend/oss.go / 此处）需一并修改。
-  const BUILD = "1.0.0";
+  const BUILD = "1.1.0";
 
   const state = {
     connectionId: null,
@@ -1108,6 +1108,7 @@
       if (previewKind(it.name)) acts.push(["preview", "eye", "op.preview"]);
       acts.push(["download", "download", "op.download"]);
       acts.push(["addr", "link", "op.addr"]);
+      acts.push(["public", "globe", "op.public"]);
       acts.push(["name", "copy", "op.name"]);
       acts.push(["detail", "info", "op.detail"]);
       if (canWrite) {
@@ -2410,6 +2411,49 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     return `https://${state.bucket}.${host}/${key}`;
   }
 
+  // 公共读：与预签名是两条不同的分享路径。预签名 URL 必然带过期时间（S3 协议上限
+  // 7 天），公共读则是把对象 ACL 设为 public-read，用不带签名的普通 URL 访问——
+  // 没有过期时间，代价是任何持链接者都能永久访问。因此每次设置都要二次确认，
+  // 且只读连接直接拒绝（后端 requireWritable 也会兜底拦一次）。
+  //
+  // 流程：先查当前 ACL。已公开 → 询问是否恢复私有（取消则只复制链接）；
+  // 未公开 → 风险确认后设置，成功则展示永久链接。
+  async function doPublic(it) {
+    if (!state.bucket) { setStatus(I18N.t("addr.missingEndpoint")); return; }
+    let pub = false;
+    try {
+      const r = await invoke("objects/get_acl", { bucket: state.bucket, path: it.name });
+      pub = !!(r && r.public);
+    } catch (e) {
+      setStatus(I18N.t("public.readFail") + ((e && e.message) ? e.message : ""), true);
+      return;
+    }
+    if (pub) {
+      const revoke = await openConfirm(I18N.t("public.alreadyTitle"), I18N.t("public.alreadyMsg"));
+      if (!revoke) {
+        showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
+        return;
+      }
+      try {
+        await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: false });
+        setStatus(I18N.t("public.revoked"));
+      } catch (e) {
+        setStatus(I18N.t("public.setFail") + ((e && e.message) ? e.message : ""), true);
+      }
+      return;
+    }
+    if (state.readOnly) { setStatus(I18N.t("public.readOnly"), true); return; }
+    const ok = await openConfirm(I18N.t("public.confirmTitle"), I18N.t("public.confirmMsg", { name: it.name }));
+    if (!ok) return;
+    try {
+      await invoke("objects/set_acl", { bucket: state.bucket, path: it.name, public: true });
+      setStatus(I18N.t("public.ok"));
+      showCopy(I18N.t("public.title"), fallbackUrl(it), false, I18N.t("public.hint"));
+    } catch (e) {
+      setStatus(I18N.t("public.setFail") + ((e && e.message) ? e.message : ""), true);
+    }
+  }
+
   async function doCopyUrl(it) {
     if (!state.bucket) { setStatus(I18N.t("addr.missingEndpoint")); return; }
     // 询问有效期（秒）：60 ~ 7 天；取消则放弃
@@ -2637,6 +2681,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     if (act === "preview") { openPreview(it); return; }
     if (act === "download") { doDownload(it); return; }
     if (act === "addr") { doCopyUrl(it); return; }
+    if (act === "public") { doPublic(it); return; }
     if (act === "detail") { openDetail(it); return; }
     if (act === "rename") { doRename(it); return; }
     if (act === "delete") { doDelete(it); return; }
