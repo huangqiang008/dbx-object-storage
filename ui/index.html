@@ -18,11 +18,15 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
         <span data-i18n="toolbar.upload">上传</span>
       </button>
+      <button id="uploadDirBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span data-i18n="toolbar.uploadDir">上传文件夹</span>
+      </button>
       <button id="refreshBtn" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         <span data-i18n="toolbar.refresh">刷新</span>
       </button>
-      <input id="fileInput" type="file" hidden />
+      <input id="fileInput" type="file" multiple hidden />
       <span class="spacer"></span>
       <span id="endpointLabel" class="toolbar-endpoint"></span>
       <button id="connBtn" type="button">
@@ -38,22 +42,34 @@
       <span id="countLabel" class="count"></span>
     </div>
 
-    <div class="table-head">
+    <div class="table-head" id="tableHead">
       <span class="col-ck"><span id="selAll" class="ckbox" data-selall="1" data-i18n-title="sel.all" title="全选 / 取消全选"></span></span>
-      <span class="col-name" data-i18n="col.name">名称</span>
-      <span class="col-size" data-i18n="col.size">类型 / 大小</span>
-      <span class="col-time" data-i18n="col.time">最后修改时间</span>
-      <span class="col-ops" data-i18n="col.ops">操作</span>
+      <span class="col-name sortable" id="colName" data-sort="name" data-i18n="col.name" data-i18n-title="col.sortHint" role="button" tabindex="0">名称</span>
+      <span class="col-size sortable" id="colSize" data-sort="size" data-i18n="col.size" data-i18n-title="col.sortHint" role="button" tabindex="0">类型 / 大小</span>
+      <span class="col-time sortable" id="colTime" data-sort="modified" data-i18n="col.time" data-i18n-title="col.sortHint" role="button" tabindex="0">最后修改时间</span>
     </div>
 
     <main class="layout">
       <section id="list" class="list">
         <div id="listContent" class="list-content"></div>
+        <!-- 拖拽上传投放区（dragover 时显示；pointer-events:none，drop 事件落在列表上） -->
+        <div id="dropZone" class="drop-zone hidden">
+          <div class="drop-inner">
+            <svg class="drop-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+            <div class="drop-title" data-i18n="dz.title">松开鼠标开始上传</div>
+            <div class="drop-sub" data-i18n="dz.sub">支持多文件、整个文件夹与断点续传</div>
+            <div class="drop-esc" data-i18n="dz.esc">按 Esc 取消</div>
+          </div>
+        </div>
       </section>
     </main>
     <!-- 批量操作条（F3 多选）：选中 > 0 时显示 -->
     <div id="batchBar" class="batch-bar hidden">
       <span id="batchCount" class="batch-count"></span>
+      <button id="batchAddrBtn" type="button" data-i18n-title="batch.addr" title="批量复制地址">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <span data-i18n="batch.addr">批量复制地址</span>
+      </button>
       <button id="batchDownloadBtn" type="button" data-i18n-title="batch.download" title="批量下载">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
         <span data-i18n="batch.download">批量下载</span>
@@ -104,8 +120,29 @@
         </div>
         <div class="frow">
           <label data-i18n="field.sk">AccessKeySecret <i class="req">*</i></label>
-          <div class="fctrl"><input id="fSk" type="password" autocomplete="off" /></div>
-          <div class="fhelp" data-i18n="sk.help">访问密钥。保存在本机插件存储中（明文），重开会话自动回填，无需重新输入。</div>
+          <div class="fctrl with-eye">
+            <input id="fSk" type="password" autocomplete="off" />
+            <button id="skEye" class="icon-btn" type="button" data-i18n-title="sk.eye" aria-label="显示 / 隐藏 Secret"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+          <div class="fhelp" data-i18n="sk.help">访问密钥。默认不保存，每次重开需重新输入；勾选下方选项可在本机记住。</div>
+        </div>
+        <div class="frow">
+          <div class="fctrl">
+            <label class="remember-line">
+              <span id="fRememberCk" class="ckbox" data-remember="1" role="checkbox" aria-checked="false" tabindex="0"></span>
+              <span data-i18n="field.rememberSk">在本机记住 Secret（明文存储）</span>
+            </label>
+          </div>
+          <div class="fhelp" data-i18n="remember.help">Secret 将以明文写入本机插件存储，仅本插件可读。仅建议在个人设备上开启；公共设备请保持关闭。</div>
+        </div>
+        <div class="frow">
+          <div class="fctrl">
+            <label class="remember-line">
+              <span id="fReadOnlyCk" class="ckbox" data-readonly="1" role="checkbox" aria-checked="false" tabindex="0"></span>
+              <span data-i18n="field.readOnly">只读模式（禁止上传、改名、删除）</span>
+            </label>
+          </div>
+          <div class="fhelp" data-i18n="readOnly.help">开启后本连接仅可浏览、预览与下载，所有写操作都会被拒绝。适用于生产桶、他人共享的存储空间等不宜改动的环境。</div>
         </div>
         <div class="frow">
           <label data-i18n="field.endpoint">接入点 <i class="req">*</i></label>
@@ -160,10 +197,23 @@
     <div class="modal-box">
       <div class="modal-title" id="copyTitle"></div>
       <input id="copyInput" class="copy-input" type="text" readonly />
+      <textarea id="copyArea" class="copy-input copy-area hidden" readonly spellcheck="false"></textarea>
       <div class="modal-msg" id="copyHint"></div>
       <div class="modal-foot">
         <button id="copyClose" type="button" data-i18n="copy.close">关闭</button>
         <button id="copyBtn" type="button" class="primary" data-i18n="copy.btn">复制</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 对象详情弹窗：展示单个对象的完整元数据（大小/MIME/ETag/修改时间/存储键） -->
+  <div id="detailModal" class="modal hidden">
+    <div class="modal-box modal-box-wide">
+      <div class="modal-title" id="detailTitle" data-i18n="detail.title">对象详情</div>
+      <div class="detail-grid" id="detailGrid"></div>
+      <div class="modal-foot">
+        <button id="detailCopyKey" type="button" data-i18n="detail.copyKey">复制完整路径</button>
+        <button id="detailClose" type="button" class="primary" data-i18n="copy.close">关闭</button>
       </div>
     </div>
   </div>
@@ -175,10 +225,47 @@
         <span class="ico" id="pvIcon"></span>
         <span id="pvName" class="preview-name"></span>
         <span id="pvMeta" class="preview-meta"></span>
+        <button id="pvEdit" class="icon-btn hidden" type="button" data-i18n-title="preview.edit" title="编辑">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
+        </button>
+        <button id="pvSave" class="icon-btn hidden" type="button" data-i18n-title="preview.save" title="保存">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a2 2 0 0 0-1-1H8a2 2 0 0 0-1 1v7"/><path d="M7 3v4a2 2 0 0 0 1 1h7"/></svg>
+        </button>
+        <button id="pvFull" class="icon-btn" type="button" data-i18n-title="pv.full" title="全屏预览">
+          <svg class="ico-max" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+          <svg class="ico-min" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+        </button>
         <button id="pvCopy" class="icon-btn hidden" type="button" data-i18n-title="preview.copy" title="复制内容">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
         </button>
         <button id="pvClose" class="icon-btn" type="button" data-i18n-title="dialog.close" title="关闭">&#10005;</button>
+      </div>
+      <!-- 图片预览缩放工具条（仅图片预览时显示；缩放/旋转/适应 + 打开原文件） -->
+      <div id="pvToolbar" class="pv-toolbar hidden">
+        <button id="pvZoomOut" class="icon-btn" type="button" data-i18n-title="pv.zoomOut" title="缩小"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg></button>
+        <span id="pvZoomLabel" class="pv-zoom">100%</span>
+        <button id="pvZoomIn" class="icon-btn" type="button" data-i18n-title="pv.zoomIn" title="放大"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg></button>
+        <button id="pvRotate" class="icon-btn" type="button" data-i18n-title="pv.rotate" title="旋转"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg></button>
+        <button id="pvFit" class="icon-btn" type="button" data-i18n-title="pv.fit" title="适应窗口"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+        <span class="pv-spacer"></span>
+        <button id="pvOpen" class="icon-btn" type="button" data-i18n-title="pv.open" title="浏览器打开原文件"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></button>
+      </div>
+      <!-- 3D 预览工具条（仅 3D 模型预览时显示；适应/边线/投影/背景/导航/六向视图/截图） -->
+      <div id="pv3dToolbar" class="pv-toolbar hidden">
+        <button id="pv3dFit" class="icon-btn" type="button" data-i18n-title="pv3d.fit" title="适应视图"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+        <button id="pv3dEdges" class="icon-btn" type="button" data-i18n-title="pv3d.edges" title="边线显示"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></button>
+        <button id="pv3dProj" class="icon-btn pv3d-proj" type="button" data-i18n-title="pv3d.proj" title="切换投影">透视</button>
+        <button id="pv3dBg" class="icon-btn pv3d-proj" type="button" data-i18n-title="pv3d.bg" title="切换背景">深色</button>
+        <button id="pv3dNav" class="icon-btn pv3d-proj" type="button" data-i18n-title="pv3d.nav" title="切换导航模式">转台</button>
+        <span class="pv-spacer"></span>
+        <button id="pv3dVf" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vf" title="前视图">前</button>
+        <button id="pv3dVb" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vb" title="后视图">后</button>
+        <button id="pv3dVl" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vl" title="左视图">左</button>
+        <button id="pv3dVr" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vr" title="右视图">右</button>
+        <button id="pv3dVt" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vt" title="顶视图">顶</button>
+        <button id="pv3dVbottom" class="icon-btn pv3d-mini" type="button" data-i18n-title="pv3d.vd" title="底视图">底</button>
+        <span class="pv-spacer"></span>
+        <button id="pv3dShot" class="icon-btn" type="button" data-i18n-title="pv3d.shot" title="截图下载"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></button>
       </div>
       <div id="pvBody" class="preview-body"></div>
     </div>
@@ -199,11 +286,15 @@
     </div>
     <div id="dlMsg" class="dl-msg"></div>
     <div class="dl-foot">
+      <button id="dlRetry" class="dl-btn primary hidden" type="button" data-i18n="dl.retry">重试失败项</button>
       <button id="dlCancel" class="dl-btn" type="button" data-i18n="dl.cancel">取消</button>
       <button id="dlOk" class="dl-btn primary hidden" type="button" data-i18n="dl.ok">关闭</button>
     </div>
   </div>
 
+  <!-- 加载顺序有依赖：utils/icons 只挂全局供 main.js 取用，必须先于 main.js 执行 -->
+  <script src="utils.js"></script>
+  <script src="icons.js"></script>
   <script src="i18n.js"></script>
   <script src="main.js"></script>
 </body>

@@ -46,6 +46,9 @@ func main() {
 	// 日志一律走 stderr，stdout 仅输出协议消息
 	log.SetOutput(os.Stderr)
 
+	// 启动即回收上次崩溃遗留的上传临时文件（正常路径已在 complete/abort 清理）
+	cleanupStaleUploads()
+
 	reader := bufio.NewReader(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
 
@@ -114,12 +117,18 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleObjectsWrite(req.Params)
 	case "objects/delete":
 		return handleObjectsDelete(req.Params)
+	case "objects/dir_info":
+		return handleObjectsDirInfo(req.Params)
+	case "objects/delete_dir":
+		return handleObjectsDeleteDir(req.Params)
 	case "objects/delete_batch":
 		return handleObjectsDeleteBatch(req.Params)
 	case "objects/save":
 		return handleObjectSave(req.Params)
 	case "objects/move":
 		return handleObjectsMove(req.Params)
+	case "objects/move_dir":
+		return handleObjectsMoveDir(req.Params)
 	case "objects/stat":
 		return handleObjectsStat(req.Params)
 	case "objects/presign":

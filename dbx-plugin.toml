@@ -8,6 +8,6 @@ directory = "backend"
 binary = "backend"
 
 [package]
-include = ["assets", "ui"]
+include = ["assets", "ui", "LICENSE"]
 
 # 前端为静态文件，无需构建步骤；开发宿主直接加载并监听 ui/ 变化

@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.object.browser",
   "name": "Object Storage",
-  "version": "0.4.2",
+  "version": "1.0.0",
   "publisher": "huangqiang",
   "description": "Browse and read/write Alibaba Cloud OSS, MinIO and other S3-compatible object storage, with large-directory pagination and list virtualization.",
   "icon": "assets/plugin.svg",
@@ -29,11 +29,18 @@
       "fields": [
         { "key": "display_name", "label": "连接名称", "type": "text", "binding": "name", "required": true },
         {
-          "key": "provider", "label": "Provider", "type": "select", "binding": "config",
+          "key": "provider", "label": "存储类型", "type": "select", "binding": "config",
           "required": false, "default": "aliyun",
           "options": [
-            { "value": "aliyun", "label": "Alibaba Cloud OSS" },
-            { "value": "s3", "label": "S3 Compatible (MinIO, etc.)" }
+            { "value": "aliyun", "label": "阿里云 OSS" },
+            { "value": "tencent-cos", "label": "腾讯云 COS" },
+            { "value": "huawei-obs", "label": "华为云 OBS" },
+            { "value": "aws-s3", "label": "AWS S3" },
+            { "value": "minio", "label": "MinIO" },
+            { "value": "cloudflare-r2", "label": "Cloudflare R2" },
+            { "value": "wasabi", "label": "Wasabi" },
+            { "value": "backblaze-b2", "label": "Backblaze B2" },
+            { "value": "s3", "label": "其他 S3 兼容服务" }
           ]
         },
         { "key": "access_key_id", "label": "AccessKeyId", "type": "text", "binding": "config", "required": true },
@@ -41,19 +48,24 @@
           "key": "access_key_secret", "label": "Secret", "type": "password", "binding": "secret",
           "required": true, "description": "AccessKeySecret"
         },
-        { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "config", "required": true },
+        { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "config", "required": true, "description": "接入点，含协议与端口。例如：阿里云 oss-cn-hangzhou.aliyuncs.com、腾讯云 cos.ap-guangzhou.myqcloud.com、华为云 obs.cn-north-1.myhuaweicloud.com、AWS s3.amazonaws.com、MinIO http://192.168.1.10:9000" },
         {
           "key": "region", "label": "Region", "type": "text", "binding": "config",
-          "required": false, "description": "可选，少数服务需显式指定",
-          "visible_when": { "field": "provider", "one_of": ["s3"] }
+          "required": false, "description": "可选，部分服务需显式指定",
+          "visible_when": { "field": "provider", "one_of": ["tencent-cos", "huawei-obs", "aws-s3", "minio", "cloudflare-r2", "wasabi", "backblaze-b2", "s3"] }
         },
         {
           "key": "path_style", "label": "Path Style", "type": "boolean", "binding": "config",
           "required": false, "default": false,
           "description": "自建 MinIO 建议开启（以路径形式寻址）",
-          "visible_when": { "field": "provider", "one_of": ["s3"] }
+          "visible_when": { "field": "provider", "one_of": ["tencent-cos", "huawei-obs", "aws-s3", "minio", "cloudflare-r2", "wasabi", "backblaze-b2", "s3"] }
         },
-        { "key": "bucket", "label": "Bucket", "type": "text", "binding": "config", "required": false }
+        { "key": "bucket", "label": "Bucket", "type": "text", "binding": "config", "required": false },
+        {
+          "key": "read_only", "label": "只读模式", "type": "boolean", "binding": "config",
+          "required": false, "default": false,
+          "description": "开启后该连接仅可浏览、预览与下载，上传/改名/删除等写操作一律被拒绝。适合生产桶或共享存储。"
+        }
       ],
       "workbench": "com.object.browser.main",
       "capabilities": ["test", "connect", "disconnect"]
@@ -72,19 +84,27 @@
         "com.object.browser.connection": {
           "label": "对象存储（阿里云 OSS / S3 兼容）",
           "fields": {
-            "provider": {
-              "label": "存储类型",
-              "options": {
-                "aliyun": "阿里云 OSS",
-                "s3": "S3 兼容（MinIO 等）"
-              }
-            },
+        "provider": {
+          "label": "存储类型",
+          "options": {
+            "aliyun": "阿里云 OSS",
+            "tencent-cos": "腾讯云 COS",
+            "huawei-obs": "华为云 OBS",
+            "aws-s3": "AWS S3",
+            "minio": "MinIO",
+            "cloudflare-r2": "Cloudflare R2",
+            "wasabi": "Wasabi",
+            "backblaze-b2": "Backblaze B2",
+            "s3": "其他 S3 兼容服务"
+          }
+        },
             "access_key_id": { "label": "AccessKeyId" },
             "access_key_secret": { "label": "Secret", "description": "AccessKeySecret（访问密钥）" },
             "endpoint": { "label": "接入点" },
             "region": { "label": "Region" },
             "path_style": { "label": "Path Style", "description": "自建 MinIO 建议开启" },
-            "bucket": { "label": "Bucket" }
+            "bucket": { "label": "Bucket" },
+            "read_only": { "label": "只读模式", "description": "开启后该连接仅可浏览、预览与下载，所有写操作被拒绝。" }
           }
         },
         "com.object.browser.main": { "label": "对象存储" }

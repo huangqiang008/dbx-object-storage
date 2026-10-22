@@ -1,8 +1,12 @@
-dist/
-bin/
+/dist/
+/bin/
 *.dbxp
 *.env
-vendor/
+# 仅忽略根目录的构建工具目录；ui/vendor/ 是随包分发的本地资产，必须入库
+/vendor/
+backend/*.exe
 # dev 宿主运行时数据（含明文凭据，严禁提交）
 .dbx-dev/
 store-submission/
+# 助手工作区（日志 / 临时脚本，不入库）
+.workbuddy/

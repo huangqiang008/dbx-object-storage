@@ -2,5 +2,5 @@
   "name": "Object Storage",
   "tags": ["storage", "oss", "s3", "minio", "object-storage", "browser"],
   "license": "MIT",
-  "releaseNotes": "Generic object storage browser for Alibaba Cloud OSS and S3-compatible services (MinIO, R2, COS...). Driver abstraction, large-directory pagination, chunked upload, presigned sharing, file preview, multi-select batch delete/download."
+  "releaseNotes": "Generic object storage browser for Alibaba Cloud OSS and S3-compatible services (MinIO, R2, COS...). Driver abstraction, large-directory pagination, chunked upload, presigned sharing, file preview, multi-select batch delete/download.\n\nDisclaimer: this is an independent third-party plugin. It is not affiliated with, endorsed, authorized or sponsored by any of the storage vendors named above; vendor and service names are used solely to indicate protocol compatibility and remain the property of their respective owners. Credentials are used only between your machine and your own storage service and are never sent to third parties; the Secret is stored in plaintext on this machine only if you explicitly opt in. Presigned links grant access to anyone holding them until they expire."
 }

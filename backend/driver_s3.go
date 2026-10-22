@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -118,6 +119,8 @@ func (d *s3Driver) ListObjects(req ListReq) (ListPage, error) {
 		MaxKeys:    max,
 		StartAfter: req.Token,
 		UseV1:      true,
+		// Recursive 时 minio-go 不传 delimiter，返回 prefix 下全部对象而非折叠前缀。
+		Recursive: req.Recursive,
 	})
 
 	// 消费 max+1 条：第 max+1 条仅用于判定是否截断，不交付。
@@ -267,6 +270,81 @@ func (d *s3Driver) Delete(bucket, path string) error {
 	return d.cl.RemoveObject(context.Background(), b, path, minio.RemoveObjectOptions{})
 }
 
+// listPrefixKeys 平铺列举 prefix 下的全部对象 key（Recursive 不折叠子目录）。
+// 最多收集 limit+1 个：多出的一个仅用于判定是否超限，避免为判断多拉一整页。
+func (d *s3Driver) listPrefixKeys(ctx context.Context, bucket, prefix string, limit int) ([]string, bool, error) {
+	keys := make([]string, 0, limit+1)
+	it := d.cl.ListObjects(ctx, bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+	for obj := range it {
+		if obj.Err != nil {
+			return nil, false, obj.Err
+		}
+		keys = append(keys, obj.Key)
+		if len(keys) > limit {
+			return keys[:limit], true, nil
+		}
+	}
+	return keys, false, nil
+}
+
+// DeletePrefix 先完整收集 prefix 下的 key（超限即中止，不做任何删除），
+// 再用 RemoveObjects 批量删除，保证「超限中止」是原子的。
+func (d *s3Driver) DeletePrefix(bucket, prefix string, limit int) (int, error) {
+	b, err := d.pickBucket(bucket)
+	if err != nil {
+		return 0, err
+	}
+	if limit <= 0 {
+		limit = deleteBatchSize
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // 提前跳出时释放 minio-go 内部分页 goroutine
+
+	keys, hasMore, err := d.listPrefixKeys(ctx, b, prefix, limit)
+	if err != nil {
+		return 0, err
+	}
+	if hasMore {
+		return 0, fmt.Errorf("目录内对象超过 %d 个，已中止删除；请分批处理或改用服务端工具", limit)
+	}
+
+	deleted := 0
+	var failed []string
+	// RemoveObjects 是流式接口：channel 供 key、channel 回错误，天然支持大批量。
+	objCh := make(chan minio.ObjectInfo)
+	resCh := d.cl.RemoveObjects(ctx, b, objCh, minio.RemoveObjectsOptions{})
+	go func() {
+		defer close(objCh)
+		for _, k := range keys {
+			select {
+			case objCh <- minio.ObjectInfo{Key: k}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	for res := range resCh {
+		if res.Err != nil {
+			failed = append(failed, res.ObjectName)
+			continue
+		}
+		deleted++
+	}
+	if len(failed) > 0 {
+		return deleted, fmt.Errorf("有 %d 个对象删除失败（首个：%s）", len(failed), failed[0])
+	}
+
+	// prefix 自身的目录标记对象（若存在）不在上面列举结果里时单独补删一次。
+	// MinIO 对不存在的 key 按幂等语义返回成功，不影响结果。
+	if err := d.cl.RemoveObject(ctx, b, prefix, minio.RemoveObjectOptions{}); err != nil {
+		log.Printf("补删目录标记对象失败 %s: %v", prefix, err)
+	}
+	return deleted, nil
+}
+
 func (d *s3Driver) Move(bucket, from, to string) error {
 	b, err := d.pickBucket(bucket)
 	if err != nil {
@@ -284,4 +362,102 @@ func (d *s3Driver) Move(bucket, from, to string) error {
 		return fmt.Errorf("删除源失败: %w", err)
 	}
 	return nil
+}
+
+// MovePrefix 递归移动目录：把 fromPrefix 下的全部对象复制到 toPrefix 之下，
+// 全部复制成功后再删除源对象。语义与阿里云实现一致，详见该方法的注释。
+func (d *s3Driver) MovePrefix(bucket, fromPrefix, toPrefix string, limit int) (int, error) {
+	b, err := d.pickBucket(bucket)
+	if err != nil {
+		return 0, err
+	}
+	if limit <= 0 {
+		limit = deleteBatchSize
+	}
+	fromP := normalizeDirPrefix(fromPrefix)
+	toP := normalizeDirPrefix(toPrefix)
+	if fromP == toP {
+		return 0, fmt.Errorf("源目录与目标目录相同")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 列举源前缀下的全部对象（递归）。超限即中止，不做任何改动。
+	keys, hasMore, err := d.listPrefixKeys(ctx, b, fromP, limit)
+	if err != nil {
+		return 0, fmt.Errorf("列举源目录失败: %w", err)
+	}
+	if hasMore {
+		return 0, fmt.Errorf("目录内对象超过 %d 个，已中止移动；请分批处理", limit)
+	}
+	// listPrefixKeys 会把 prefix 自身的目录标记对象也列进来（它以 prefix 开头），
+	// 需剔除：它应作为整体标记单独搬移，而非按相对路径展开。
+	objKeys := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k == fromP {
+			continue
+		}
+		objKeys = append(objKeys, k)
+	}
+
+	if len(objKeys) == 0 {
+		// 目录下无对象：仍需搬移目录标记对象，否则改名后目录「凭空消失」。
+		if _, e := d.cl.CopyObject(ctx,
+			minio.CopyDestOptions{Bucket: b, Object: toP},
+			minio.CopySrcOptions{Bucket: b, Object: fromP},
+		); e != nil {
+			return 0, fmt.Errorf("移动目录标记对象失败: %w", e)
+		}
+		if e := d.cl.RemoveObject(ctx, b, fromP, minio.RemoveObjectOptions{}); e != nil {
+			return 0, fmt.Errorf("删除源目录标记对象失败: %w", e)
+		}
+		return 0, nil
+	}
+
+	// 阶段一：全量复制，失败即回滚已复制目标。
+	copied := make([]string, 0, len(objKeys))
+	rollback := func() {
+		for _, dst := range copied {
+			_ = d.cl.RemoveObject(ctx, b, dst, minio.RemoveObjectOptions{})
+		}
+	}
+	for _, src := range objKeys {
+		dst := toP + strings.TrimPrefix(src, fromP)
+		if _, e := d.cl.CopyObject(ctx,
+			minio.CopyDestOptions{Bucket: b, Object: dst},
+			minio.CopySrcOptions{Bucket: b, Object: src},
+		); e != nil {
+			rollback()
+			return 0, fmt.Errorf("复制对象失败（%s → %s），已回滚 %d 个已复制对象: %w",
+				src, dst, len(copied), e)
+		}
+		copied = append(copied, dst)
+	}
+
+	// 阶段二：批量删除源对象（RemoveObjects 流式接口，天然支持大批量）。
+	deleted := 0
+	objCh := make(chan minio.ObjectInfo)
+	resCh := d.cl.RemoveObjects(ctx, b, objCh, minio.RemoveObjectsOptions{})
+	go func() {
+		defer close(objCh)
+		for _, k := range objKeys {
+			select {
+			case objCh <- minio.ObjectInfo{Key: k}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	for res := range resCh {
+		if res.Err != nil {
+			return len(copied), fmt.Errorf("重命名已完成但清理源对象失败（已复制 %d 个，请手动核对）: %w", len(copied), res.Err)
+		}
+		deleted++
+	}
+	// 补删源目录标记对象（幂等）。
+	if e := d.cl.RemoveObject(ctx, b, fromP, minio.RemoveObjectOptions{}); e != nil {
+		log.Printf("补删源目录标记对象失败 %s: %v", fromP, e)
+	}
+	return deleted, nil
 }
