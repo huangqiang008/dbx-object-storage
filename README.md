@@ -120,6 +120,7 @@ node_modules/.bin/esbuild o3dv-src/engine/main.js --bundle --format=iife --globa
 │   ├── vendor/            #   marked / highlight.js（随包本地资产，供 MD 与代码预览）
 │   ├── licenses/          #   APACHE-2.0 全文
 │   └── index.html / styles.css
+├── docs/                  # 文档（docs/RELEASE.md = 发布 runbook）
 ├── vendor/                # file-viewer 构建工具目录（gitignore；entry.js + 锁定依赖）
 └── dist/                  # 构建产物（不入库）
 ```
@@ -134,18 +135,21 @@ node_modules/.bin/esbuild o3dv-src/engine/main.js --bundle --format=iife --globa
 
 ## 发布流程
 
-1. 更新版本号 —— **三处必须同步改**，漏改会导致状态栏显示旧版本，反而干扰排查：
+概要四步（**完整可执行 runbook——含 gh 安装与认证、逐平台打包签名、tag、Release 命令、发布后自检、已知坑——见 [`docs/RELEASE.md`](docs/RELEASE.md)**）：
+
+1. 更新版本号 —— **四处必须同步改**，漏改会导致状态栏显示旧版本，反而干扰排查：
 
    | 位置 | 字段 |
    |---|---|
    | `manifest.json` | `version` |
    | `backend/oss.go` | `const pluginVersion` |
    | `ui/main.js` | `const BUILD` |
+   | `README.md` | 顶部版本徽章 |
 
-   顺带更新本文件顶部版本徽章。然后执行 `dbx-plugin package` 重新打包
+   然后在目标平台本机执行 `dbx-plugin package .` 重新打包（原生 sidecar 不支持跨平台打包）
 2. 在本仓库根目录运行 `bash scripts/release.sh`，自动扫描 `dist/` 下当前版本的全部 `.dbxp`，聚合 sha256/size 写入 `store-submission/release-candidates.json` 的 `targets`（已含 windows-x64，新增 macOS/Linux 等）
-3. 打 tag 并创建 GitHub Release，上传各平台的 `.dbxp`、`.artifact.json`、`release-candidates.json`
-4. `dbx-store` 同步 Workflow 自动创建候选 PR → 维护者审核签名 → 进入官方目录
+3. 提交、打 tag 并推送：`git tag -a vX.Y.Z` → `git push origin main` → `git push origin vX.Y.Z`
+4. 用 `gh release create vX.Y.Z` 创建 GitHub Release，上传各平台的 `.dbxp`、`.artifact.json`、`release-candidates.json`；随后 `dbx-store` 同步 Workflow 自动创建候选 PR → 维护者审核签名 → 进入官方目录
 
 ## 免责声明 / Disclaimer
 
