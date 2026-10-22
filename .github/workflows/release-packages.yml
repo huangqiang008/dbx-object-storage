@@ -33,8 +33,10 @@ jobs:
             target: windows-x64
           - os: macos-14        # Apple Silicon
             target: darwin-arm64
-          - os: macos-13        # Intel
-            target: darwin-x64
+          # Intel 版（darwin-x64）需要 macos-13 runner，实测长时间拿不到机器（一直 queued），
+          # 会阻塞 publish；等 runner 供给恢复后把下面两行加回 matrix 即可。
+          # - os: macos-13        # Intel
+          #   target: darwin-x64
     steps:
       - uses: actions/checkout@v4
 
