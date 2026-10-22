@@ -169,8 +169,7 @@ GH_TOKEN=$(...) gh release view v1.0.0
 
 ### 许可与合规
 - 插件本体：MIT
-- 第三方组件：随包分发 `ui/THIRD-PARTY-NOTICES.md`
-- 审查报告：仓库根目录 `LICENSE-AUDIT.md`
+- 第三方组件：随包分发 `ui/THIRD-PARTY-NOTICES.md`（完整清单、版权声明与授权选择）
 
 **免责声明**：本插件为独立第三方开发，与文中提及的各存储服务厂商无隶属、代理、赞助或背书关系；相关商标归各自权利人所有。
 ```
