@@ -150,8 +150,11 @@ func parseConn(params json.RawMessage) (ConnConfig, *RPCError) {
 		if c.Bucket == "" {
 			c.Bucket = coerceString(ec["bucket"])
 		}
-		if c.Provider.String() == "" {
-			c.Provider = flexString(coerceString(ec["provider"]))
+		// The host lifecycle payload carries a provider routing envelope at the
+		// top level ({id, databaseType}), which must not override the plugin's
+		// own provider selection from external_config.
+		if provider := coerceString(ec["provider"]); provider != "" {
+			c.Provider = flexString(provider)
 		}
 		if c.Region.String() == "" {
 			c.Region = flexString(coerceString(ec["region"]))
