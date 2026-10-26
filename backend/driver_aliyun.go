@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -22,7 +23,15 @@ type aliyunDriver struct {
 }
 
 func newAliyunDriver(cfg ConnConfig) (StorageDriver, error) {
-	client, err := oss.New(cfg.Endpoint, cfg.AccessKeyID, cfg.AccessKeySecret)
+	// 有 SessionToken 说明是 STS 临时凭证：必须走 oss.SecurityToken，
+	// 否则服务端会因签名缺少 x-oss-security-token 而拒绝所有请求。
+	// 走 oss.New 的默认路径（无 token）时行为与之前完全一致。
+	opts := []oss.ClientOption{oss.SecurityToken(cfg.SessionToken)}
+	// 自定义 CA / 跳过校验：显式配置时才注入，否则沿用 SDK 默认传输。
+	if tr := buildTransport(cfg); tr != nil {
+		opts = append(opts, oss.HTTPClient(&http.Client{Transport: tr}))
+	}
+	client, err := oss.New(cfg.Endpoint, cfg.AccessKeyID, cfg.AccessKeySecret, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +116,21 @@ func (d *aliyunDriver) Stat(bucket, path string) (ObjMeta, error) {
 		return ObjMeta{}, err
 	}
 	m := ObjMeta{
-		MIME: h.Get("Content-Type"),
-		ETag: strings.Trim(h.Get("ETag"), `"`),
+		MIME:               h.Get("Content-Type"),
+		ETag:               strings.Trim(h.Get("ETag"), `"`),
+		ContentType:        h.Get("Content-Type"),
+		ContentDisposition: h.Get("Content-Disposition"),
+		CacheControl:       h.Get("Cache-Control"),
+		ContentEncoding:    h.Get("Content-Encoding"),
+		UserMetadata:       map[string]string{},
+	}
+	// 阿里云把用户自定义元数据放在 x-oss-meta-* 头里，剥掉前缀存裸键名，
+	// 与 S3 侧的 x-amz-meta-* 归一化到同一形状。
+	for k, vs := range h {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-oss-meta-") && len(vs) > 0 {
+			m.UserMetadata[lk[len("x-oss-meta-"):]] = vs[0]
+		}
 	}
 	if s := h.Get("Content-Length"); s != "" {
 		m.Size, _ = strconv.ParseInt(s, 10, 64)
@@ -121,6 +143,7 @@ func (d *aliyunDriver) Stat(bucket, path string) (ObjMeta, error) {
 	if m.MIME == "" {
 		m.MIME = guessMime(path)
 	}
+	m.ContentType = m.MIME
 	return m, nil
 }
 
@@ -149,29 +172,63 @@ func (d *aliyunDriver) OpenStream(bucket, path string) (io.ReadCloser, error) {
 }
 
 func (d *aliyunDriver) Put(bucket, path string, r io.Reader, _ int64, mime string) error {
+	return d.PutWithClass(bucket, path, r, 0, mime, "")
+}
+
+// PutWithClass 上传对象并指定存储类别（2.5）。
+// storageClass 为归一化值（standard/ia/archive），空串 = 服务端默认。
+func (d *aliyunDriver) PutWithClass(bucket, path string, r io.Reader, _ int64, mime, storageClass string) error {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return err
 	}
-	var opts []oss.Option
-	if mime != "" {
-		opts = append(opts, oss.ContentType(mime))
+	opts, err := aliyunUploadOpts(mime, storageClass)
+	if err != nil {
+		return err
 	}
 	return b.PutObject(path, r, opts...)
 }
 
 // PutFromFile 分片并发上传本地文件（5MB 分片 + 断点），不整文件进内存。
 func (d *aliyunDriver) PutFromFile(bucket, path, filePath, mime string) error {
+	return d.PutFromFileWithClass(bucket, path, filePath, mime, "")
+}
+
+// PutFromFileWithClass 分片上传并指定存储类别（2.5）。
+func (d *aliyunDriver) PutFromFileWithClass(bucket, path, filePath, mime, storageClass string) error {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return err
 	}
+	opts, err := aliyunUploadOpts(mime, storageClass)
+	if err != nil {
+		return err
+	}
+	opts = append(opts, oss.Checkpoint(true, ""), oss.Routines(3))
+	return b.UploadFile(path, filePath, 5*1024*1024, opts...)
+}
+
+// aliyunUploadOpts 组装上传选项：Content-Type + 存储类别。
+//
+// 阿里云与 S3 的存储类别枚举名不同（阿里云 Archive / S3 GLACIER），
+// 归一化在 driver 层完成，UI 只认 standard/ia/archive 三个值。
+func aliyunUploadOpts(mime, storageClass string) ([]oss.Option, error) {
 	var opts []oss.Option
 	if mime != "" {
 		opts = append(opts, oss.ContentType(mime))
 	}
-	opts = append(opts, oss.Checkpoint(true, ""), oss.Routines(3))
-	return b.UploadFile(path, filePath, 5*1024*1024, opts...)
+	switch storageClass {
+	case "":
+	case StorageClassStandard:
+		opts = append(opts, oss.StorageClass(oss.StorageStandard))
+	case StorageClassIA:
+		opts = append(opts, oss.StorageClass(oss.StorageIA))
+	case StorageClassArchive:
+		opts = append(opts, oss.StorageClass(oss.StorageArchive))
+	default:
+		return nil, fmt.Errorf("不支持的存储类别: %s", storageClass)
+	}
+	return opts, nil
 }
 
 // Presign 离线计算签名 URL（V1 签名，不发网络请求）。
@@ -298,68 +355,84 @@ func (d *aliyunDriver) Delete(bucket, path string) error {
 // deleteBatchSize 与 OSS DeleteObjects 单次 1000 个 key 的服务端上限一致。
 const deleteBatchSize = 1000
 
-// listPrefixKeys 平铺列举 prefix 下的全部对象 key（不传 delimiter，故含各层级子对象）。
-// 最多收集 limit+1 个：多出的那一个只用于判定「是否超过上限」，超出即返回 hasMore=true，
-// 由调用方决定中止还是放行，从而避免为了一次判断而多拉一整页。
-func (d *aliyunDriver) listPrefixKeys(b *oss.Bucket, prefix string, limit int) ([]string, bool, error) {
-	keys := make([]string, 0, limit+1)
-	marker := oss.Marker("")
-	for {
-		resp, err := b.ListObjects(oss.Prefix(prefix), marker, oss.MaxKeys(1000))
-		if err != nil {
-			return nil, false, err
-		}
-		for _, o := range resp.Objects {
-			keys = append(keys, o.Key)
-			if len(keys) > limit {
-				return keys[:limit], true, nil
-			}
-		}
-		if !resp.IsTruncated {
-			return keys, false, nil
-		}
-		marker = oss.Marker(resp.NextMarker)
+// copyConcurrency 目录移动时对象复制阶段的并发路数。CopyObject 是服务端
+// 服务端拷贝，单对象耗时主要在往返上，4 路并发即可把大目录搬迁提速约 4 倍，
+// 又不至于触发服务端限流。
+const copyConcurrency = 4
+
+// DeleteMany 分块调用服务端批量删除接口（1000 key/次），把逐条 DELETE 的
+// N 次往返压成 ⌈N/1000⌉ 次。请求级失败（网络/权限）无法细分逐 key 结果，
+// 记为该块全部失败；请求成功则按服务端确认的 DeletedObjects 计数。
+func (d *aliyunDriver) DeleteMany(bucket string, paths []string) (int, []DeleteFailure) {
+	if len(paths) == 0 {
+		return 0, nil
 	}
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return 0, allFailed(paths, err)
+	}
+	deleted := 0
+	var fails []DeleteFailure
+	for start := 0; start < len(paths); start += deleteBatchSize {
+		end := start + deleteBatchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[start:end]
+		res, e := b.DeleteObjects(chunk)
+		if e != nil {
+			for _, k := range chunk {
+				fails = append(fails, DeleteFailure{Key: k, Error: e.Error()})
+			}
+			continue
+		}
+		deleted += len(res.DeletedObjects)
+	}
+	return deleted, fails
 }
 
-// DeletePrefix 先完整收集 prefix 下的 key（超限即中止，不做任何删除），
-// 再分批调用 DeleteObjects。这样「超限中止」是原子的，不会删一半留下残缺目录。
-func (d *aliyunDriver) DeletePrefix(bucket, prefix string, limit int) (int, error) {
+// DeletePrefix 流式递归删除：列举一页（≤1000 key）删一页，循环到列举耗尽，
+// 不设总量上限——任意大小的目录都能删。页与页之间用 marker 续接：已删 key
+// 均不大于当前 marker，删除不影响后续页的列举起点。中途失败返回已删除数量
+// （部分删除无法回滚，这是删除语义的固有性质，错误信息如实带出进度）。
+func (d *aliyunDriver) DeletePrefix(bucket, prefix string) (int, error) {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return 0, err
 	}
-	if limit <= 0 {
-		limit = deleteBatchSize
-	}
-	keys, hasMore, err := d.listPrefixKeys(b, prefix, limit)
-	if err != nil {
-		return 0, err
-	}
-	if hasMore {
-		return 0, fmt.Errorf("目录内对象超过 %d 个，已中止删除；请分批处理或改用服务端工具", limit)
-	}
 	deleted := 0
-	for start := 0; start < len(keys); start += deleteBatchSize {
-		end := start + deleteBatchSize
-		if end > len(keys) {
-			end = len(keys)
+	marker := oss.Marker("")
+	for {
+		resp, e := b.ListObjects(oss.Prefix(prefix), marker, oss.MaxKeys(deleteBatchSize))
+		if e != nil {
+			return deleted, fmt.Errorf("列举失败（已删除 %d 个）: %w", deleted, e)
 		}
-		res, err := b.DeleteObjects(keys[start:end])
-		if err != nil {
-			return deleted, fmt.Errorf("批量删除失败（已删除 %d 个）: %w", deleted, err)
+		if len(resp.Objects) > 0 {
+			keys := make([]string, 0, len(resp.Objects))
+			for _, o := range resp.Objects {
+				keys = append(keys, o.Key)
+			}
+			res, e := b.DeleteObjects(keys)
+			if e != nil {
+				return deleted, fmt.Errorf("批量删除失败（已删除 %d 个）: %w", deleted, e)
+			}
+			deleted += len(res.DeletedObjects)
 		}
-		deleted += len(res.DeletedObjects)
+		if !resp.IsTruncated || resp.NextMarker == "" {
+			break
+		}
+		marker = oss.Marker(resp.NextMarker)
 	}
-	// prefix 自身的目录标记对象（若存在）不在上面的列举结果里时，单独补删一次。
-	// 多数情况下该 key 并不存在，此处 DeleteObject 按幂等语义返回成功，不影响结果。
+	// prefix 自身的目录标记对象（若存在）补删一次：多数情况下该 key 并不存在，
+	// DeleteObject 按幂等语义返回成功，不影响结果。
 	if err := b.DeleteObject(prefix); err != nil {
 		log.Printf("补删目录标记对象失败 %s: %v", prefix, err)
 	}
 	return deleted, nil
 }
 
-func (d *aliyunDriver) Move(bucket, from, to string) error {
+// Copy 复制单个对象（不删源）。Move 的复制阶段与批量复制共用。
+func (d *aliyunDriver) Copy(bucket, from, to string) error {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return err
@@ -367,29 +440,72 @@ func (d *aliyunDriver) Move(bucket, from, to string) error {
 	if _, err := b.CopyObject(from, to); err != nil {
 		return fmt.Errorf("复制失败: %w", err)
 	}
+	return nil
+}
+
+func (d *aliyunDriver) Move(bucket, from, to string) error {
+	if err := d.Copy(bucket, from, to); err != nil {
+		return err
+	}
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return err
+	}
 	if err := b.DeleteObject(from); err != nil {
 		return fmt.Errorf("删除源失败: %w", err)
 	}
 	return nil
 }
 
-// MovePrefix 递归移动目录：把 fromPrefix 下的全部对象复制到 toPrefix 之下，
-// 全部复制成功后再删除源对象。
+// copyKeysConcurrently 并发复制一批 key（copyConcurrency 路）。返回已成功
+// 的目标 key 列表与首个错误；失败时等待全部在途复制结束后返回，调用方据
+// copied 列表回滚。
+func (d *aliyunDriver) copyKeysConcurrently(b *oss.Bucket, pairs [][2]string) ([]string, error) {
+	type result struct {
+		dst string
+		err error
+	}
+	results := make(chan result, len(pairs))
+	sem := make(chan struct{}, copyConcurrency)
+	var wg sync.WaitGroup
+	for _, p := range pairs {
+		wg.Add(1)
+		go func(src, dst string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			_, e := b.CopyObject(src, dst)
+			results <- result{dst, e}
+		}(p[0], p[1])
+	}
+	wg.Wait()
+	close(results)
+	copied := make([]string, 0, len(pairs))
+	var firstErr error
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		copied = append(copied, r.dst)
+	}
+	return copied, firstErr
+}
+
+// MovePrefix 分页流式移动目录：每页（≤1000 key）先并发复制、页内全部成功后
+// 批量删除该页源对象，再处理下一页。不设总量上限。
 //
-// 关键设计：
-//   - 源集合在移动前一次性列举（含各层级子对象，不折叠目录）。超限即中止，
-//     不做任何改动——「超限中止」是原子的。
-//   - 先全量复制、后批量删除。若复制中途失败，已复制的目标对象会被回滚删除，
-//     源对象保持原样，不留半吊子状态。
-//   - 删除阶段失败只影响部分源对象（已复制成功的目标对象保留），此时返回
-//     明确的错误说明，让用户知道「重命名已完成但清理未净」，而不是假装成功。
-func (d *aliyunDriver) MovePrefix(bucket, fromPrefix, toPrefix string, limit int) (int, error) {
+// 失败语义：
+//   - 页内复制失败：回滚本页已复制的目标对象，源对象原样保留；此前各页
+//     已复制且已删源、无法回滚，错误信息如实报告已移动数量。
+//   - 页内删除失败：目标对象已就位，仅清理未净——重跑 move 即可续传
+//     （CopyObject 覆盖写幂等，已搬迁对象会重复复制一次后继续）。
+func (d *aliyunDriver) MovePrefix(bucket, fromPrefix, toPrefix string) (int, error) {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return 0, err
-	}
-	if limit <= 0 {
-		limit = deleteBatchSize
 	}
 	// 源前缀与目标前缀都必须以 "/" 结尾：尾部斜杠缺失会导致
 	// 「a/b」误匹配「a/bak/...」这类同前缀兄弟目录。
@@ -399,31 +515,53 @@ func (d *aliyunDriver) MovePrefix(bucket, fromPrefix, toPrefix string, limit int
 		return 0, fmt.Errorf("源目录与目标目录相同")
 	}
 
-	// 列举源前缀下的全部对象（递归，不折叠子目录）
-	var keys []string
+	moved := 0
 	marker := oss.Marker("")
 	for {
-		resp, e := b.ListObjects(oss.Prefix(fromP), marker, oss.MaxKeys(1000))
+		resp, e := b.ListObjects(oss.Prefix(fromP), marker, oss.MaxKeys(deleteBatchSize))
 		if e != nil {
-			return 0, fmt.Errorf("列举源目录失败: %w", e)
+			return moved, fmt.Errorf("列举源目录失败（已移动 %d 个）: %w", moved, e)
 		}
-		for _, o := range resp.Objects {
-			if o.Key == fromP {
-				continue // 目录标记对象本身单独处理
+		if len(resp.Objects) > 0 {
+			pairs := make([][2]string, 0, len(resp.Objects))
+			for _, o := range resp.Objects {
+				if o.Key == fromP {
+					continue // 目录标记对象单独处理
+				}
+				pairs = append(pairs, [2]string{o.Key, toP + strings.TrimPrefix(o.Key, fromP)})
 			}
-			keys = append(keys, o.Key)
-			if len(keys) > limit {
-				return 0, fmt.Errorf("目录内对象超过 %d 个，已中止移动；请分批处理", limit)
+			if len(pairs) > 0 {
+				copied, cerr := d.copyKeysConcurrently(b, pairs)
+				if cerr != nil {
+					// 回滚本页已复制的目标对象，避免留下重复数据
+					for _, dst := range copied {
+						_ = b.DeleteObject(dst)
+					}
+					return moved, fmt.Errorf("复制对象失败（已移动 %d 个，本页已回滚）: %w", moved, cerr)
+				}
+				keys := make([]string, 0, len(pairs))
+				for _, p := range pairs {
+					keys = append(keys, p[0])
+				}
+				res, de := b.DeleteObjects(keys)
+				if de != nil {
+					return moved + len(keys), fmt.Errorf(
+						"目标对象已全部复制，但清理源对象失败（可重试续传，已复制 %d 个）: %w",
+						moved+len(keys), de)
+				}
+				moved += len(res.DeletedObjects)
 			}
 		}
-		if !resp.IsTruncated {
+		if !resp.IsTruncated || resp.NextMarker == "" {
 			break
 		}
 		marker = oss.Marker(resp.NextMarker)
 	}
-	if len(keys) == 0 {
-		// 源前缀下没有对象：可能只有目录标记对象，也可能根本不存在。
-		// 仍需把目录标记对象搬过去，否则改名后目录会「凭空消失」。
+
+	if moved == 0 {
+		// 目录为空（或不存在）：仅剩目录标记对象需要搬移，否则改名后目录会
+		// 「凭空消失」。目录标记对象不存在（目录本身不存在）时 CopyObject 报错，
+		// 与旧行为一致地把错误返回给用户。
 		if _, e := b.CopyObject(fromP, toP); e != nil {
 			return 0, fmt.Errorf("移动目录标记对象失败: %w", e)
 		}
@@ -432,42 +570,277 @@ func (d *aliyunDriver) MovePrefix(bucket, fromPrefix, toPrefix string, limit int
 		}
 		return 0, nil
 	}
-
-	// 阶段一：全量复制。逐个 CopyObject（小批量，OSS 单次 CopyObject 上限
-	// 只针对一次请求里的多个 key，逐个调用天然规避）。
-	copied := make([]string, 0, len(keys))
-	rollback := func() {
-		// 回滚：删除已复制的目标对象，避免留下重复数据。
-		for _, dst := range copied {
-			_ = b.DeleteObject(dst)
-		}
-	}
-	for _, src := range keys {
-		dst := toP + strings.TrimPrefix(src, fromP)
-		if _, e := b.CopyObject(src, dst); e != nil {
-			rollback()
-			return 0, fmt.Errorf("复制对象失败（%s → %s），已回滚 %d 个已复制对象: %w",
-				src, dst, len(copied), e)
-		}
-		copied = append(copied, dst)
-	}
-
-	// 阶段二：批量删除源对象。
-	deleted := 0
-	for start := 0; start < len(keys); start += deleteBatchSize {
-		end := start + deleteBatchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-		res, e := b.DeleteObjects(keys[start:end])
-		if e != nil {
-			return len(copied), fmt.Errorf("重命名已完成但清理源对象失败（已复制 %d 个，请手动核对）: %w", len(copied), e)
-		}
-		deleted += len(res.DeletedObjects)
-	}
-	// 补删目录标记对象：多数情况下该 key 不存在，按幂等语义返回成功。
+	// 有子对象被搬移：目标目录由子对象隐式重建，无需显式搬标记对象；
+	// 仅补删源标记对象（多数情况下该 key 不存在，幂等）。
 	if e := b.DeleteObject(fromP); e != nil {
 		log.Printf("补删源目录标记对象失败 %s: %v", fromP, e)
 	}
-	return deleted, nil
+	return moved, nil
+}
+
+// ---------- 2.2 跨桶复制 ----------
+
+// CopyAcross 跨桶复制单个对象（2.2）。
+//
+// 阿里云用 CopyObjectTo（源桶 = 当前 bucket，目标桶 = dstBucket）。
+// 同桶时 dstBucket == bucket，走的是与 Copy 等价的一条路径。
+func (d *aliyunDriver) CopyAcross(srcBucket, dstBucket, from, to string) error {
+	src, err := d.bucket(srcBucket)
+	if err != nil {
+		return err
+	}
+	dstName, err := d.pickBucket(dstBucket)
+	if err != nil {
+		return err
+	}
+	if dstName == src.BucketName {
+		if _, err := src.CopyObject(from, to); err != nil {
+			return fmt.Errorf("复制失败: %w", err)
+		}
+		return nil
+	}
+	if _, err := src.CopyObjectTo(dstName, to, from); err != nil {
+		return fmt.Errorf("跨桶复制失败: %w", err)
+	}
+	return nil
+}
+
+// MoveAcross 跨桶移动单个对象（copy + delete）。
+func (d *aliyunDriver) MoveAcross(srcBucket, dstBucket, from, to string) error {
+	if err := d.CopyAcross(srcBucket, dstBucket, from, to); err != nil {
+		return err
+	}
+	b, err := d.bucket(srcBucket)
+	if err != nil {
+		return err
+	}
+	if err := b.DeleteObject(from); err != nil {
+		return fmt.Errorf("删除源失败: %w", err)
+	}
+	return nil
+}
+
+// CopyPrefixAcross 跨桶递归复制一个前缀（2.2）。
+//
+// 与 MovePrefix 同构，但不删源对象。流式推进：每页（≤1000 key）并发复制，
+// 页内失败回滚本页已复制的目标对象。跨桶时每页都要重新取目标桶句柄。
+func (d *aliyunDriver) CopyPrefixAcross(srcBucket, dstBucket, fromPrefix, toPrefix string) (int, error) {
+	src, err := d.bucket(srcBucket)
+	if err != nil {
+		return 0, err
+	}
+	dstName, err := d.pickBucket(dstBucket)
+	if err != nil {
+		return 0, err
+	}
+	fromP := normalizeDirPrefix(fromPrefix)
+	toP := normalizeDirPrefix(toPrefix)
+	if fromP == toP && src.BucketName == dstName {
+		return 0, fmt.Errorf("源目录与目标目录相同")
+	}
+
+	copied := 0
+	marker := oss.Marker("")
+	for {
+		resp, e := src.ListObjects(oss.Prefix(fromP), marker, oss.MaxKeys(deleteBatchSize))
+		if e != nil {
+			return copied, fmt.Errorf("列举源目录失败（已复制 %d 个）: %w", copied, e)
+		}
+		if len(resp.Objects) > 0 {
+			pairs := make([][2]string, 0, len(resp.Objects))
+			for _, o := range resp.Objects {
+				if o.Key == fromP {
+					continue // 目录标记对象单独处理
+				}
+				pairs = append(pairs, [2]string{o.Key, toP + strings.TrimPrefix(o.Key, fromP)})
+			}
+			if len(pairs) > 0 {
+				ok, cerr := d.copyKeysAcrossConcurrently(src, dstName, pairs)
+				if cerr != nil {
+					// 回滚本页已复制的目标对象，避免留下重复数据
+					dst, _ := d.client.Bucket(dstName)
+					for _, key := range ok {
+						_ = dst.DeleteObject(key)
+					}
+					return copied, fmt.Errorf("复制对象失败（已复制 %d 个，本页已回滚）: %w", copied, cerr)
+				}
+				copied += len(ok)
+			}
+		}
+		if !resp.IsTruncated || resp.NextMarker == "" {
+			break
+		}
+		marker = oss.Marker(resp.NextMarker)
+	}
+
+	if copied == 0 {
+		// 源目录为空：仍需复制目录标记对象（若存在），否则目标目录会「凭空消失」
+		if _, e := src.CopyObjectTo(dstName, toP, fromP); e != nil {
+			return 0, fmt.Errorf("复制目录标记对象失败: %w", e)
+		}
+		return 0, nil
+	}
+	return copied, nil
+}
+
+// copyKeysAcrossConcurrently 跨桶并发复制一批 key（copyConcurrency 路）。
+func (d *aliyunDriver) copyKeysAcrossConcurrently(src *oss.Bucket, dstName string, pairs [][2]string) ([]string, error) {
+	type result struct {
+		dst string
+		err error
+	}
+	results := make(chan result, len(pairs))
+	sem := make(chan struct{}, copyConcurrency)
+	var wg sync.WaitGroup
+	for _, p := range pairs {
+		wg.Add(1)
+		go func(srcKey, dstKey string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			_, e := src.CopyObjectTo(dstName, dstKey, srcKey)
+			results <- result{dstKey, e}
+		}(p[0], p[1])
+	}
+	wg.Wait()
+	close(results)
+	copied := make([]string, 0, len(pairs))
+	var firstErr error
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		copied = append(copied, r.dst)
+	}
+	return copied, firstErr
+}
+
+// ---------- 2.1 元数据编辑 ----------
+
+// SetMeta 改写对象元数据（2.1）。
+//
+// 对象存储没有「原地改元数据」的 API——阿里云与 S3 都只能靠
+// CopyObject + MetadataDirective=REPLACE 把对象复制到自身并替换元数据。
+// 因此这里是「自复制」：src == dst，服务端用新元数据覆盖原对象。
+//
+// 注意：自复制会重写对象的 Last-Modified 与 ETag（ETag 对同内容不变），
+// 这是协议层面的固有代价，无法规避。
+func (d *aliyunDriver) SetMeta(bucket, path string, patch MetaPatch) error {
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return err
+	}
+	// REPLACE 语义下不传任何元数据字段 = 全部清空。因此未修改的项
+	// 必须先读出原值再回填，否则会误清。
+	cur, err := d.Stat(bucket, path)
+	if err != nil {
+		return fmt.Errorf("读取原元数据失败: %w", err)
+	}
+
+	opts := []oss.Option{oss.MetadataDirective(oss.MetaReplace)}
+	ct := patch.ContentType
+	if ct == "" {
+		ct = cur.ContentType
+	}
+	if ct != "" {
+		opts = append(opts, oss.ContentType(ct))
+	}
+	cd := patch.ContentDisposition
+	if cd == "" {
+		cd = cur.ContentDisposition
+	}
+	if cd != "" {
+		opts = append(opts, oss.ContentDisposition(cd))
+	}
+	cc := patch.CacheControl
+	if cc == "" {
+		cc = cur.CacheControl
+	}
+	if cc != "" {
+		opts = append(opts, oss.CacheControl(cc))
+	}
+	ce := patch.ContentEncoding
+	if ce == "" {
+		ce = cur.ContentEncoding
+	}
+	if ce != "" {
+		opts = append(opts, oss.ContentEncoding(ce))
+	}
+	// 自定义元数据：patch 为 nil 表示不动；非 nil 则整体替换
+	meta := patch.UserMetadata
+	if meta == nil {
+		meta = cur.UserMetadata
+	}
+	for k, v := range meta {
+		if v == "" {
+			continue // 空值 = 删除该键，OSS 侧靠「不传」表达
+		}
+		opts = append(opts, oss.Meta(k, v))
+	}
+	if patch.StorageClass != "" {
+		sc, err := aliyunStorageClass(patch.StorageClass)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, oss.StorageClass(sc))
+	}
+	if _, err := b.CopyObject(path, path, opts...); err != nil {
+		return fmt.Errorf("修改元数据失败: %w", err)
+	}
+	return nil
+}
+
+// aliyunStorageClass 把归一化存储类别翻译成阿里云枚举。
+func aliyunStorageClass(v string) (oss.StorageClassType, error) {
+	switch v {
+	case StorageClassStandard:
+		return oss.StorageStandard, nil
+	case StorageClassIA:
+		return oss.StorageIA, nil
+	case StorageClassArchive:
+		return oss.StorageArchive, nil
+	default:
+		return "", fmt.Errorf("不支持的存储类别: %s", v)
+	}
+}
+
+// ---------- 2.3 对象标签 ----------
+
+// SetTags 覆盖式设置对象标签（2.3）。传空 map 表示清空所有标签。
+func (d *aliyunDriver) SetTags(bucket, path string, tags map[string]string) error {
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return err
+	}
+	tagging := oss.Tagging{}
+	for k, v := range tags {
+		if k == "" {
+			continue
+		}
+		tagging.Tags = append(tagging.Tags, oss.Tag{Key: k, Value: v})
+	}
+	if err := b.PutObjectTagging(path, tagging); err != nil {
+		return fmt.Errorf("设置标签失败: %w", err)
+	}
+	return nil
+}
+
+// GetTags 读取对象标签（2.3）。对象无标签时返回空 map 而非错误。
+func (d *aliyunDriver) GetTags(bucket, path string) (map[string]string, error) {
+	b, err := d.bucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	res, err := b.GetObjectTagging(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取标签失败: %w", err)
+	}
+	out := make(map[string]string, len(res.Tags))
+	for _, t := range res.Tags {
+		out[t.Key] = t.Value
+	}
+	return out, nil
 }

@@ -76,7 +76,7 @@ func TestResolveDownloadDir_Defaults(t *testing.T) {
 		t.Skip("取不到用户主目录，跳过")
 	}
 	// 未指定时应落到 ~/Downloads（或取不到主目录时的临时目录）
-	got, e := resolveDownloadDir("")
+	got, e := resolveDownloadDir("", false)
 	if e != nil {
 		t.Fatalf("未指定目录不应报错: %v", e)
 	}
@@ -99,15 +99,15 @@ func TestResolveDownloadDir_RejectsEscapes(t *testing.T) {
 	}
 	// 带 ../ 的逃逸尝试
 	escape := filepath.Join(home, "..", "..", "..", "Windows", "System32")
-	if _, e := resolveDownloadDir(escape); e == nil {
+	if _, e := resolveDownloadDir(escape, false); e == nil {
 		t.Errorf("应拒绝逃逸路径: %s", escape)
 	}
 	// 直接给系统目录
-	if _, e := resolveDownloadDir("/etc"); e == nil {
+	if _, e := resolveDownloadDir("/etc", false); e == nil {
 		t.Error("应拒绝 /etc")
 	}
 	// 同前缀兄弟目录
-	if _, e := resolveDownloadDir(home + "-backup"); e == nil {
+	if _, e := resolveDownloadDir(home + "-backup", false); e == nil {
 		t.Error("应拒绝同前缀兄弟目录")
 	}
 }
@@ -123,7 +123,7 @@ func TestResolveDownloadDir_AcceptsValidPaths(t *testing.T) {
 		os.TempDir(),
 		" " + filepath.Join(home, "Downloads") + " ", // 前后空格应被 trim
 	} {
-		if _, e := resolveDownloadDir(p); e != nil {
+		if _, e := resolveDownloadDir(p, false); e != nil {
 			t.Errorf("应接受合法路径 %q: %v", p, e)
 		}
 	}
@@ -136,7 +136,7 @@ func TestResolveDownloadDir_ReturnsCleanAbsPath(t *testing.T) {
 		t.Skip("取不到用户主目录，跳过")
 	}
 	messy := filepath.Join(home, "Downloads", "..", "Downloads", ".")
-	got, e := resolveDownloadDir(messy)
+	got, e := resolveDownloadDir(messy, false)
 	if e != nil {
 		t.Fatalf("不应报错: %v", e)
 	}
@@ -145,5 +145,25 @@ func TestResolveDownloadDir_ReturnsCleanAbsPath(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, filepath.Clean(home)) {
 		t.Errorf("应仍在主目录内, got %q", got)
+	}
+}
+
+// picked=true（目录来自系统原生选择对话框）放宽白名单：
+// 主目录之外的盘/目录应被放行——这正是原生选择器的意义。
+func TestResolveDownloadDir_PickedAllowsOutsideRoots(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("取不到用户主目录，跳过")
+	}
+	outside := home + "-backup" // 同前缀兄弟目录：picked=false 拒绝、picked=true 放行
+	if _, e := resolveDownloadDir(outside, false); e == nil {
+		t.Errorf("picked=false 应拒绝白名单外目录: %s", outside)
+	}
+	got, e := resolveDownloadDir(outside, true)
+	if e != nil {
+		t.Errorf("picked=true 应放行 OS 确认的目录 %q: %v", outside, e)
+	}
+	if got != filepath.Clean(outside) {
+		t.Errorf("picked=true 应返回 Clean 绝对路径, got %q", got)
 	}
 }

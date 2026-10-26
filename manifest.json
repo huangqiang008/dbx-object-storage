@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.object.browser",
   "name": "Object Storage",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "publisher": "huangqiang",
   "description": "Browse and read/write Alibaba Cloud OSS, MinIO and other S3-compatible object storage, with large-directory pagination and list virtualization.",
   "icon": "assets/plugin.svg",
@@ -48,6 +48,10 @@
           "key": "access_key_secret", "label": "Secret", "type": "password", "binding": "secret",
           "required": true, "description": "AccessKeySecret"
         },
+        {
+          "key": "session_token", "label": "STS Token", "type": "password", "binding": "secret",
+          "required": false, "description": "使用 STS 临时凭证时填写（与临时 AccessKeyId / Secret 成对下发）。留空表示使用长期密钥。"
+        },
         { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "config", "required": true, "description": "接入点，含协议与端口。例如：阿里云 oss-cn-hangzhou.aliyuncs.com、腾讯云 cos.ap-guangzhou.myqcloud.com、华为云 obs.cn-north-1.myhuaweicloud.com、AWS s3.amazonaws.com、MinIO http://192.168.1.10:9000" },
         {
           "key": "region", "label": "Region", "type": "text", "binding": "config",
@@ -65,6 +69,16 @@
           "key": "read_only", "label": "只读模式", "type": "boolean", "binding": "config",
           "required": false, "default": false,
           "description": "开启后该连接仅可浏览、预览与下载，上传/改名/删除等写操作一律被拒绝。适合生产桶或共享存储。"
+        },
+        {
+          "key": "skip_verify_tls", "label": "跳过 TLS 证书校验", "type": "boolean", "binding": "config",
+          "required": false, "default": false,
+          "description": "关闭服务端证书校验，仅用于自签/内网端点。会失去中间人攻击（MITM）防护，请仅在可信网络使用。"
+        },
+        {
+          "key": "ca_cert", "label": "自定义 CA 证书（PEM）", "type": "text", "binding": "config",
+          "required": false,
+          "description": "粘贴服务端 CA 的 PEM 文本（优先于「跳过校验」，仍会验证证书链）。适用于私有 CA 签发的 HTTPS 端点。"
         }
       ],
       "workbench": "com.object.browser.main",
@@ -100,11 +114,14 @@
         },
             "access_key_id": { "label": "AccessKeyId" },
             "access_key_secret": { "label": "Secret", "description": "AccessKeySecret（访问密钥）" },
+            "session_token": { "label": "STS Token", "description": "使用 STS 临时凭证时填写（与临时 AccessKeyId / Secret 成对下发）。留空表示使用长期密钥。" },
             "endpoint": { "label": "接入点" },
             "region": { "label": "Region" },
             "path_style": { "label": "Path Style", "description": "自建 MinIO 建议开启" },
             "bucket": { "label": "Bucket" },
-            "read_only": { "label": "只读模式", "description": "开启后该连接仅可浏览、预览与下载，所有写操作被拒绝。" }
+            "read_only": { "label": "只读模式", "description": "开启后该连接仅可浏览、预览与下载，所有写操作被拒绝。" },
+            "skip_verify_tls": { "label": "跳过 TLS 证书校验", "description": "关闭服务端证书校验，仅用于自签/内网端点。会失去中间人攻击防护，请仅在可信网络使用。" },
+            "ca_cert": { "label": "自定义 CA 证书（PEM）", "description": "粘贴服务端 CA 的 PEM 文本（优先于「跳过校验」，仍会验证证书链）。适用于私有 CA 签发的 HTTPS 端点。" }
           }
         },
         "com.object.browser.main": { "label": "对象存储" }

@@ -206,7 +206,14 @@ func TestWriteHandlersRejectWhenReadOnly(t *testing.T) {
 		{"objects/delete_dir", handleObjectsDeleteDir, `{"bucket":"b","path":"p"}`},
 		{"objects/delete_batch", handleObjectsDeleteBatch, `{"bucket":"b","paths":["p"]}`},
 		{"objects/move", handleObjectsMove, `{"bucket":"b","from":"a","to":"b"}`},
+		{"objects/copy", handleObjectsCopy, `{"bucket":"b","from":"a","to":"b"}`},
 		{"objects/move_dir", handleObjectsMoveDir, `{"bucket":"b","from":"a/","to":"b/"}`},
+		{"objects/copy_dir", handleObjectsCopyDir, `{"bucket":"b","from":"a/","to":"b/"}`},
+		{"objects/copy_across", handleObjectsCopyAcross, `{"bucket":"b","dstBucket":"c","from":"a","to":"b"}`},
+		{"objects/move_across", handleObjectsMoveAcross, `{"bucket":"b","dstBucket":"c","from":"a","to":"b"}`},
+		{"objects/copy_dir_across", handleObjectsCopyDirAcross, `{"bucket":"b","dstBucket":"c","from":"a/","to":"b/"}`},
+		{"objects/set_meta", handleObjectsSetMeta, `{"bucket":"b","path":"p","contentType":"text/plain"}`},
+		{"objects/set_tags", handleObjectsSetTags, `{"bucket":"b","path":"p","tags":{"k":"v"}}`},
 		{"upload/begin", handleUploadBegin, `{"bucket":"b","path":"p","size":1}`},
 	}
 	for _, c := range cases {

@@ -125,10 +125,28 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleObjectsDeleteBatch(req.Params)
 	case "objects/save":
 		return handleObjectSave(req.Params)
+	case "app/pick_dir":
+		return handleAppPickDir(req.Params)
 	case "objects/move":
 		return handleObjectsMove(req.Params)
+	case "objects/copy":
+		return handleObjectsCopy(req.Params)
 	case "objects/move_dir":
 		return handleObjectsMoveDir(req.Params)
+	case "objects/copy_dir":
+		return handleObjectsCopyDir(req.Params)
+	case "objects/copy_across":
+		return handleObjectsCopyAcross(req.Params)
+	case "objects/move_across":
+		return handleObjectsMoveAcross(req.Params)
+	case "objects/copy_dir_across":
+		return handleObjectsCopyDirAcross(req.Params)
+	case "objects/set_meta":
+		return handleObjectsSetMeta(req.Params)
+	case "objects/set_tags":
+		return handleObjectsSetTags(req.Params)
+	case "objects/get_tags":
+		return handleObjectsGetTags(req.Params)
 	case "objects/stat":
 		return handleObjectsStat(req.Params)
 	case "objects/presign":
@@ -147,6 +165,8 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleUploadComplete(req.Params)
 	case "upload/abort":
 		return handleUploadAbort(req.Params)
+	case "upload/release":
+		return handleUploadRelease(req.Params)
 	default:
 		return nil, &RPCError{Code: -32601, Message: "method not found: " + req.Method}
 	}

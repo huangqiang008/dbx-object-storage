@@ -22,6 +22,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <span data-i18n="toolbar.uploadDir">上传文件夹</span>
       </button>
+      <!-- 存储类别（2.5）：归一化值，枚举名由后端按驱动翻译 -->
+      <select id="storageClassSel" class="storage-class-sel" data-i18n-title="storageClass.title" title="上传存储类别">
+        <option value="" data-i18n="storageClass.default">默认存储</option>
+        <option value="standard" data-i18n="storageClass.standard">标准</option>
+        <option value="ia" data-i18n="storageClass.ia">低频访问</option>
+        <option value="archive" data-i18n="storageClass.archive">归档</option>
+      </select>
       <button id="refreshBtn" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         <span data-i18n="toolbar.refresh">刷新</span>
@@ -42,7 +49,10 @@
     <div class="pathbar">
       <button id="upBtn" class="path-btn" type="button" data-i18n-title="nav.up" title="向上一级">↑</button>
       <div id="breadcrumb" class="breadcrumb"></div>
-      <input id="searchInput" class="search" type="text" data-i18n-placeholder="search.placeholder" placeholder="按名称前缀过滤，回车确认" />
+      <input id="searchInput" class="search" type="text" data-i18n-placeholder="search.placeholder" placeholder="搜索：输入名称前缀，回车确认；Shift+回车 深度搜索" />
+      <button id="searchFilterBtn" type="button" class="mini-btn" data-i18n-title="search.filterTitle" title="搜索过滤条件">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+      </button>
       <span id="countLabel" class="count"></span>
     </div>
 
@@ -78,6 +88,18 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
         <span data-i18n="batch.download">批量下载</span>
       </button>
+      <button id="batchMoveBtn" type="button" data-i18n-title="batch.move" title="移动到…">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2Z"/><path d="M12 17v-6"/><path d="m9 14 3 3 3-3"/></svg>
+        <span data-i18n="batch.move">移动到…</span>
+      </button>
+      <button id="batchCopyBtn" type="button" data-i18n-title="batch.copy" title="复制到…">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <span data-i18n="batch.copy">复制到…</span>
+      </button>
+      <button id="batchRenameBtn" type="button" data-i18n-title="batch.rename" title="批量重命名">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+        <span data-i18n="batch.rename">批量重命名</span>
+      </button>
       <button id="batchDeleteBtn" type="button" class="danger" data-i18n-title="batch.delete" title="批量删除">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
         <span data-i18n="batch.delete">批量删除</span>
@@ -100,6 +122,15 @@
       </div>
 
       <div class="form" id="tab-info">
+        <div class="frow">
+          <label data-i18n="conn.saved">已保存连接</label>
+          <div class="fctrl conn-saved">
+            <select id="savedConnSel"></select>
+            <button id="connSaveBtn" class="mini-btn" type="button" data-i18n="conn.save">保存当前</button>
+            <button id="connDelBtn" class="mini-btn" type="button" data-i18n="conn.del">删除</button>
+          </div>
+          <div class="fhelp" data-i18n="conn.savedHelp">以「名称」为键保存当前表单配置，选中即回填。Secret 仅在勾选「在本机记住 Secret」时一并保存，否则回填后需重输。</div>
+        </div>
         <div class="frow">
           <label data-i18n="field.name">名称</label>
           <div class="fctrl"><input id="fName" type="text" value="对象存储" /></div>
@@ -129,6 +160,11 @@
             <button id="skEye" class="icon-btn" type="button" data-i18n-title="sk.eye" aria-label="显示 / 隐藏 Secret"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
           </div>
           <div class="fhelp" data-i18n="sk.help">访问密钥。默认不保存，每次重开需重新输入；勾选下方选项可在本机记住。</div>
+        </div>
+        <div class="frow">
+          <label data-i18n="field.stsToken">STS Token</label>
+          <div class="fctrl"><input id="fStsToken" type="password" autocomplete="off" /></div>
+          <div class="fhelp" data-i18n="stsToken.help">使用 STS 临时凭证时填写（与临时 AK/SK 成对下发）。留空表示使用长期密钥。</div>
         </div>
         <div class="frow">
           <div class="fctrl">
@@ -164,6 +200,16 @@
           <div class="fhelp" data-i18n="pathstyle.help">以路径形式寻址（http://endpoint/bucket/key）。自建 MinIO 建议勾选。</div>
         </div>
         <div class="frow">
+          <label data-i18n="field.tlsSkip">跳过 TLS 证书校验</label>
+          <div class="fctrl"><input id="fTlsSkip" type="checkbox" /></div>
+          <div class="fhelp" data-i18n="tlsSkip.help">关闭服务端证书校验，仅用于自签/内网端点。会失去中间人攻击防护，请仅在可信网络使用。</div>
+        </div>
+        <div class="frow">
+          <label data-i18n="field.caCert">自定义 CA 证书（PEM）</label>
+          <div class="fctrl"><textarea id="fCaCert" rows="4" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea></div>
+          <div class="fhelp" data-i18n="caCert.help">粘贴服务端 CA 的 PEM 文本（优先于「跳过校验」，仍会验证证书链）。适用于私有 CA 签发的 HTTPS 端点。</div>
+        </div>
+        <div class="frow">
           <label data-i18n="field.bucket">Bucket</label>
           <div class="fctrl"><input id="fBucket" type="text" placeholder="my-bucket" /></div>
           <div class="fhelp" data-i18n="bucket.help">存储桶名称。留空则在连接根目录列出全部存储桶。</div>
@@ -197,6 +243,121 @@
     </div>
   </div>
 
+  <!-- 批量重命名（1.4）：前缀/后缀/正则三种规则，可叠加 -->
+  <div id="renameModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" data-i18n="batchRename.title">批量重命名</div>
+      <div class="modal-msg" id="renameScope"></div>
+      <div class="rename-rule">
+        <label for="renamePrefix" data-i18n="batchRename.prefix">添加前缀</label>
+        <input id="renamePrefix" class="modal-input" type="text" />
+      </div>
+      <div class="rename-rule">
+        <label for="renameSuffix" data-i18n="batchRename.suffix">添加后缀</label>
+        <input id="renameSuffix" class="modal-input" type="text" />
+      </div>
+      <div class="rename-rule">
+        <label for="renameFind" data-i18n="batchRename.find">查找（正则）</label>
+        <input id="renameFind" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="rename-rule">
+        <label for="renameReplace" data-i18n="batchRename.replace">替换为</label>
+        <input id="renameReplace" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="rename-rule">
+        <label for="renameSeq" data-i18n="batchRename.seq">序号起始</label>
+        <input id="renameSeq" class="modal-input" type="number" min="0" step="1" value="1" />
+      </div>
+      <div class="modal-detail hidden"></div>
+      <div class="modal-foot">
+        <button id="renameCancel" type="button" data-i18n="modal.cancel">取消</button>
+        <button id="renameOk" type="button" class="primary" data-i18n="batchRename.ok">应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 对象元数据编辑（2.1）：Content-Type / Content-Disposition / Cache-Control / 自定义 meta / 标签 -->
+  <div id="metaModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" id="metaTitle" data-i18n="meta.title">编辑对象元数据</div>
+      <div class="meta-field">
+        <label for="metaContentType" data-i18n="meta.contentType">Content-Type</label>
+        <input id="metaContentType" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="meta-field">
+        <label for="metaDisposition" data-i18n="meta.disposition">Content-Disposition</label>
+        <input id="metaDisposition" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="meta-field">
+        <label for="metaCacheControl" data-i18n="meta.cacheControl">Cache-Control</label>
+        <input id="metaCacheControl" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="meta-field">
+        <label for="metaUserMeta" data-i18n="meta.userMeta">自定义元数据（每行 key=value）</label>
+        <textarea id="metaUserMeta" class="modal-input meta-textarea" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div class="meta-field">
+        <label for="metaTags" data-i18n="meta.tags">标签（每行 key=value）</label>
+        <textarea id="metaTags" class="modal-input meta-textarea" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-detail hidden"></div>
+      <div class="modal-foot">
+        <button id="metaCancel" type="button" data-i18n="modal.cancel">取消</button>
+        <button id="metaOk" type="button" class="primary" data-i18n="meta.ok">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 搜索过滤条件（1.5）：大小区间 / 修改时间区间 / 扩展名 / 正则 -->
+  <div id="filterModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" data-i18n="search.filterTitle">搜索过滤条件</div>
+      <div class="rename-rule">
+        <label for="filterMinSize" data-i18n="search.minSize">最小大小(KB)</label>
+        <input id="filterMinSize" class="modal-input" type="number" min="0" step="1" />
+      </div>
+      <div class="rename-rule">
+        <label for="filterMaxSize" data-i18n="search.maxSize">最大大小(KB)</label>
+        <input id="filterMaxSize" class="modal-input" type="number" min="0" step="1" />
+      </div>
+      <div class="rename-rule">
+        <label for="filterDays" data-i18n="search.days">修改于最近 N 天内</label>
+        <input id="filterDays" class="modal-input" type="number" min="0" step="1" />
+      </div>
+      <div class="rename-rule">
+        <label for="filterExt" data-i18n="search.ext">扩展名（逗号分隔）</label>
+        <input id="filterExt" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="rename-rule">
+        <label for="filterRegex" data-i18n="search.regex">名称正则</label>
+        <input id="filterRegex" class="modal-input" type="text" spellcheck="false" />
+      </div>
+      <div class="modal-detail hidden"></div>
+      <div class="modal-foot">
+        <button id="filterReset" type="button" data-i18n="search.filterReset">清空条件</button>
+        <button id="filterCancel" type="button" data-i18n="modal.cancel">取消</button>
+        <button id="filterOk" type="button" class="primary" data-i18n="search.filterOk">应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 目标目录选择器（批量移动/复制）：桶内目录树懒加载展开，单选目标（含桶根） -->
+  <div id="dirTreeModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" id="dirTreeTitle" data-i18n="dirtree.title">选择目标目录</div>
+      <div class="dirtree-bucket">
+        <label for="dirTreeBucket" data-i18n="dirtree.bucket">目标存储桶</label>
+        <select id="dirTreeBucket"></select>
+      </div>
+      <div class="dirtree-path" id="dirTreePath"></div>
+      <div class="dirtree" id="dirTree"></div>
+      <div class="modal-foot">
+        <button id="dirTreeCancel" type="button" data-i18n="modal.cancel">取消</button>
+        <button id="dirTreeOk" type="button" class="primary" data-i18n="dirtree.ok">选择此目录</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 复制弹窗：展示下载路径 / 对象地址，并提供一键复制（沙箱下文件下载被拦截，用本机落盘 + 复制路径兜底） -->
   <div id="copyModal" class="modal hidden">
     <div class="modal-box">
@@ -218,6 +379,7 @@
       <div class="detail-grid" id="detailGrid"></div>
       <div class="modal-foot">
         <button id="detailCopyKey" type="button" data-i18n="detail.copyKey">复制完整路径</button>
+        <button id="detailEditMeta" type="button" class="hidden" data-i18n="detail.editMeta">编辑元数据</button>
         <button id="detailClose" type="button" class="primary" data-i18n="copy.close">关闭</button>
       </div>
     </div>
@@ -298,9 +460,30 @@
   </div>
 
   <!-- 加载顺序有依赖：utils/icons 只挂全局供 main.js 取用，必须先于 main.js 执行 -->
+  <!--
+    脚本加载顺序有依赖，不能随意调整：
+      utils / icons / i18n  —— 纯工具包，必须最先
+      rename_rule           —— 批量重命名的纯规则（可单测）
+      core                  —— 共享层：state / els / invoke / 通用弹窗
+      conn / browse / …     —— 各功能模块，依赖 core
+      app                   —— 入口：唯一知道全部模块，在最后启动
+
+    必须是经典 <script src>，不能用 type="module"：宿主把插件 UI 放在
+    sandbox="allow-scripts"（无 allow-same-origin）的 iframe 里，文档 origin 为 null，
+    模块图加载走 CORS 语义 → null origin 无法通过 → 静默失败。
+  -->
   <script src="utils.js"></script>
   <script src="icons.js"></script>
+  <script src="rename_rule.js"></script>
   <script src="i18n.js"></script>
-  <script src="main.js"></script>
+  <script src="core.js"></script>
+  <script src="conn.js"></script>
+  <script src="browse.js"></script>
+  <script src="batch.js"></script>
+  <script src="search.js"></script>
+  <script src="meta.js"></script>
+  <script src="transfer.js"></script>
+  <script src="preview.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
