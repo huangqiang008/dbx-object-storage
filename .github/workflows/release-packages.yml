@@ -33,13 +33,14 @@ jobs:
             target: windows-x64
           - os: macos-14        # Apple Silicon
             target: darwin-arm64
-          # Intel 版（darwin-x64）。需要 macos-13 runner（最后一代 Intel runner）。
-          # 若 GitHub 官方退役 macos-13 导致长期排不到机器（一直 queued，会拖住 publish），
-          # 改用 self-hosted Intel Mac（需仓库配置对应 runner）：
+          # Intel 版（darwin-x64）需要 macos-13 runner（最后一代 Intel runner）。
+          # 实测 v1.2.0 排队 16h+ 仍拿不到机器（一直 queued），会阻塞 publish，故暂时禁用。
+          # 等 self-hosted Intel Mac runner 就绪后把下面两行加回 matrix 即可：
+          #   - os: macos-13        # Intel
+          #     target: darwin-x64
+          # 或改用 self-hosted：
           #   - os: [self-hosted, macOS, x64]
           #     target: darwin-x64
-          - os: macos-13        # Intel
-            target: darwin-x64
     steps:
       - uses: actions/checkout@v4
 
