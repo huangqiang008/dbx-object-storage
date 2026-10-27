@@ -1,78 +1,79 @@
 #!/usr/bin/env bash
-# 聚合多平台 .dbxp 到 store-submission/release-candidates.json 的 targets 数组。
+# 聚合多平台 .dbxp 元数据到 store-submission/release-candidates.json，供 dbx-store 自动上架。
 #
-# DBX 的约束：带原生 sidecar 的插件不能用 universal 单包，必须逐平台本机打包。
-# 因此发布流程是：在每台目标机（Windows / macOS arm64 / macOS x64 / Linux）上
-#   分别执行 `dbx-plugin package .` 产出 dist/<id>-<version>-<target>.dbxp，
-# 然后在本脚本所在仓库根目录执行本脚本，自动扫描 dist/ 下"当前版本"的所有包，
-# 计算 sha256 与 size 并写入 release-candidates.json（供 dbx-store 聚合发布）。
+# DBX store 的 sync-release-candidate.mjs 对 release-candidates.json 的硬性要求：
+#   - 身份块必须放在 "plugin" 子对象：plugin.id / plugin.publisher / plugin.version / plugin.permissions
+#   - 产物数组必须叫 "artifacts"（不是 "targets"）
+#   - 每个 artifact 含 target / url / sha256 / size
 #
-# target 命名（DBX 约定）：windows-x64 / darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64
+# 关键约束：sha256 / size 必须来自 GitHub Release 上随包发布的 <target>.artifact.json，
+# 那是 dbx-plugin package 为该次构建生成的权威元数据。绝不要用本地 dist/ 的 .dbxp 重算——
+# 本地 dist 经常和 CI 实际发布的包不一致（本仓库曾因此产生 hash/size 不匹配，导致上架被拒）。
+#
+# 用法：在 CI 打出 vX.Y.Z Release（含各平台 .dbxp 与 .artifact.json）后，于仓库根目录执行本脚本，
+# 再把生成的 store-submission/release-candidates.json 用 `gh release upload vX.Y.Z --clobber` 覆盖上传。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST="$ROOT/dist"
 OUT="$ROOT/store-submission/release-candidates.json"
 MANIFEST="$ROOT/manifest.json"
-
-ID="com.object.browser"
-PUBLISHER="huangqiang"
 REPO="huangqiang008/dbx-object-storage"
 
-VERSION="$(grep -m1 '"version"' "$MANIFEST" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
-
-sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-size_of() {
-  wc -c < "$1" | tr -d ' '
-}
+# 版本号从 manifest.json 读取（供列出对应 Release 的资产生效）。
+VERSION="$(python3 - "$MANIFEST" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["version"])
+PY
+)"
 
 mkdir -p "$(dirname "$OUT")"
-TMP="$(mktemp)"
-{
-  echo "{"
-  echo "  \"schemaVersion\": 1,"
-  echo "  \"id\": \"$ID\","
-  echo "  \"publisher\": \"$PUBLISHER\","
-  echo "  \"version\": \"$VERSION\","
-  echo "  \"targets\": ["
-} > "$TMP"
 
-# 先收集全部包再写：多平台时每个条目末尾需要逗号（最后一个不需要）。
-# 早先的写法是「写下一个条目前补一行 }」，会在多平台时产出重复的 } 导致 JSON 非法，
-# 单平台时恰好不暴露——所以必须先数出总数再决定每个条目的结尾。
-pkgs=()
-for f in "$DIST"/${ID}-${VERSION}-*.dbxp; do
-  [ -e "$f" ] || continue
-  pkgs+=("$f")
-done
-total=${#pkgs[@]}
-idx=0
-for f in "${pkgs[@]}"; do
-  idx=$((idx + 1))
-  fname="$(basename "$f")"
-  target="${fname#"$ID-$VERSION-"}"
-  target="${target%.dbxp}"
-  sha="$(sha256_of "$f")"
-  sz="$(size_of "$f")"
-  url="https://github.com/$REPO/releases/download/v$VERSION/$fname"
-  {
-    echo "    {"
-    echo "      \"target\": \"$target\","
-    echo "      \"url\": \"$url\","
-    echo "      \"sha256\": \"$sha\","
-    echo "      \"size\": $sz"
-    if [ "$idx" -lt "$total" ]; then echo "    },"; else echo "    }"; fi
-  } >> "$TMP"
-done
-echo "  ]" >> "$TMP"
-echo "}" >> "$TMP"
+# 枚举 Release 上的 *.artifact.json（每个平台一个，CI 生成的权威元数据）。
+mapfile -t ARTIFACT_NAMES < <(gh api "repos/$REPO/releases/tags/v$VERSION" --jq '.assets[].name' | grep '\.artifact\.json$')
+if [ "${#ARTIFACT_NAMES[@]}" -eq 0 ]; then
+  echo "ERROR: v$VERSION 的 Release 上未找到任何 *.artifact.json，请先确认 CI 打包并上传完成。" >&2
+  exit 1
+fi
 
-mv "$TMP" "$OUT"
-echo "==> 已写入 $OUT (version=$VERSION)"
+python3 - "$OUT" "$MANIFEST" "$REPO" "$VERSION" "${ARTIFACT_NAMES[@]}" <<'PY'
+import json, sys, subprocess
+
+out_path, manifest, repo, ver = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+artifact_names = sys.argv[5:]
+
+m = json.load(open(manifest))
+pid = m.get("id", "com.object.browser")
+pub = "huangqiang"
+permissions = m.get("permissions", [])
+
+artifacts = []
+for name in artifact_names:
+    # name 形如 com.object.browser-1.2.0-darwin-arm64.artifact.json
+    meta_url = f"https://github.com/{repo}/releases/download/v{ver}/{name}"
+    raw = subprocess.run(["curl", "-sL", meta_url], capture_output=True, text=True, check=True).stdout
+    meta = json.loads(raw)
+    target = meta["target"]
+    sha = meta["sha256"]
+    size = meta["size"]
+    dbxp = f"{pid}-{ver}-{target}.dbxp"
+    dl = f"https://github.com/{repo}/releases/download/v{ver}/{dbxp}"
+    artifacts.append({"target": target, "url": dl, "sha256": sha, "size": size})
+
+artifacts.sort(key=lambda a: a["target"])
+candidate = {
+    "schemaVersion": 1,
+    "plugin": {
+        "id": pid,
+        "publisher": pub,
+        "version": ver,
+        "permissions": permissions,
+    },
+    "artifacts": artifacts,
+}
+with open(out_path, "w") as f:
+    json.dump(candidate, f, indent=2)
+    f.write("\n")
+print(f"==> 已写入 {out_path} (version={ver}, targets={len(artifacts)}: {', '.join(a['target'] for a in artifacts)})")
+PY
+
 cat "$OUT"
