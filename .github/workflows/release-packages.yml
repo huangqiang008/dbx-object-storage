@@ -101,10 +101,8 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
         shell: bash
 
-      - name: 聚合 sha256 / size
-        run: bash scripts/release.sh
-        shell: bash
-
+      # 顺序约束：release.sh 读取的是 GitHub Release 上随包发布的 <target>.artifact.json
+      # （权威元数据），所以必须先把 .dbxp + .artifact.json 传上去，再聚合。
       - name: 上传到 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -113,6 +111,19 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
           gh release upload "$TAG" --clobber \
             dist/*.dbxp \
-            dist/*.artifact.json \
-            store-submission/release-candidates.json
+            dist/*.artifact.json
+        shell: bash
+
+      - name: 聚合 sha256 / size
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release.sh
+        shell: bash
+
+      - name: 上传候选清单
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.ver.outputs.version }}"
+          gh release upload "$TAG" --clobber store-submission/release-candidates.json
         shell: bash
