@@ -566,6 +566,15 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       OB.finishDlCard(text);
       OB.setStatus(text);
     }
+    // 记入任务中心（B1）：上传只记录（File 句柄不可持久化，重试靠会话内 dlRetry 按钮）
+    OB.recordTask({
+      type: "upload",
+      bucket: OB.state.bucket,
+      keys: done.concat(failed.map((x) => x.key)),
+      ok: done.length,
+      failed: failed.map((x) => ({ key: x.key, error: x.error })),
+      cancelled,
+    });
     OB.resetPaging();
     OB.loadPage("");
   }

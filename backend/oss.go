@@ -18,7 +18,7 @@ import (
 // pluginVersion 必须与 manifest.json 的 version 及 ui/main.js 的 BUILD 一致。
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。
 // v0.2.0 起由 com.aliyun.oss.browser 改为通用 ID（阿里云 OSS / MinIO / S3 兼容）。
-const pluginVersion = "1.2.0"
+const pluginVersion = "1.4.0"
 
 // pluginID 必须与 manifest.json 的 id 完全一致，
 // dev 宿主会在 plugin/initialize 回包中校验 info.plugin.id/version。

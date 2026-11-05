@@ -1,6 +1,6 @@
 # 对象存储 / Object Storage
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue)](https://github.com/huangqiang008/dbx-object-storage/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > DBX 插件：通用对象存储浏览器。一个插件同时支持阿里云 OSS 原生与 S3 兼容协议（MinIO、AWS S3、Cloudflare R2、腾讯 COS、华为 OBS、Backblaze B2 等）。
@@ -25,6 +25,7 @@
 - **多协议驱动**：`StorageDriver` 抽象层统一厂商差异——阿里云 OSS 走原生 SDK，其余走 S3 兼容协议（minio-go），新增存储只需实现一个驱动接口。**所有能力双端对等**：只在一侧存在的厂商特性（OSS 的静态网站托管 / 访问日志 / Referer 防盗链等）一律不进接口，避免出现「阿里云能用、S3 不能用」的功能
 - **大目录友好**：服务端分页（marker 游标，单页 10–1000 可配）+ 列表虚拟化渲染，百万级目录不卡顿、不爆内存
 - **可排序列表**：点表头按名称 / 大小 / 时间升降序，目录恒在前；支持键盘 Tab + Enter 操作。排序在客户端进行（服务端排序对分页外的对象无效）
+- **扫描全部并排序（v1.3.0）**：只加载了部分分页时排序是不完整的（客户端排序只作用于已加载条目），列表头部会出现「扫描全部并排序」按钮——一键拉完当前目录全部对象（上限 2 万条防失控，进度可见、可取消）后再排序，结果完整；已达上限会如实标注「结果不含全部对象」
 - **大文件上传**：256KB 分片直传 sidecar 暂存，落盘后流式上转（阿里云分片并发 / MinIO 自动 multipart），内存恒定、可中途取消
 - **多文件 / 文件夹上传**：一次选多个文件或整个目录（目录按 `webkitRelativePath` 保留层级），**3 路并发上传**（单文件时按字节显示进度，多文件时按项显示），串行上传 N 个文件要 N 轮往返，并发后接近线性缩短
 - **上传存储类别**：工具栏下拉选择 标准 / 低频访问 / 归档（归一化枚举，底层按驱动翻译：阿里云 `Standard/IA/Archive`、S3 `STANDARD/STANDARD_IA/GLACIER`），选择结果记入本机存储
@@ -42,6 +43,10 @@
 - **深度搜索**：搜索框 Shift+Enter 触发，以「当前前缀 + 搜索词」递归扫描整个目录树（游标翻页、进度与可取消、结果上限 2 万条防失控），结果为全 key 平铺列表，批量下载/删除/移动照常可用
 - **搜索过滤条件**：工具栏漏斗按钮打开过滤面板，可按 大小区间 / 修改时间区间 / 扩展名白名单 / 名称正则 过滤（客户端筛选——服务端列举协议不支持这些条件），目录项不受过滤影响
 - **Shift 范围多选**：按住 Shift 勾选可从上次锚点连选到当前行，批量挑选上百项不用点上百次
+- **键盘快捷键（v1.3.0，文件管理器惯例）**：↑/↓ 移动高亮行（Shift+↑/↓ 范围连选）、Ctrl+A 全选、Ctrl+F 或 `/` 聚焦搜索、Ctrl+C/X/V 复制/剪切/粘贴对象到当前目录（同桶走 move/copy，跨桶自动切跨桶接口，冲突被拒绝而非覆盖）、空格快速预览、Enter 进入目录/预览/下载、Backspace 向上一级、Delete 删除、F2 重命名。输入框聚焦或弹窗打开时不劫持按键
+- **书签 / 最近访问（v1.3.0）**：路径栏星形按钮打开常用位置下拉——「添加书签」记住 桶+前缀（本机存储，上限 20 个，右键删除），「最近访问」自动记录进入过的位置（上限 10 个，跨桶自动重置），常用深目录一键直达
+- **预览失败下载兜底（v1.3.0）**：文件类型不支持预览、Office Worker 不可用或加载失败时，失败面板内直接提供「下载该文件」按钮，不用关掉预览再回列表找行操作
+- **传输任务中心（v1.4.0）**：工具栏「任务」打开任务历史——批量下载/上传/删除/移动/复制的结果统一记录（时间、桶、成功/失败计数），**落盘本机 sidecar**（`tasks.jsonl`，滚动截断上限 1MB），跨插件重启留存。失败任务可展开逐 key 错误明细；**下载类失败项一键重试**（复用原始落盘目录与相对路径，中断对象由后端断点续传），删除/移动/复制类只记录不提供重试（重复执行有副作用）——上传的会话内重试沿用进度卡「重试失败项」按钮
 - **已保存连接**：连接表单以「名称」为键保存/回填/删除多套连接配置；Secret 仅在勾选「记住 Secret」时一并落盘，否则回填后需重输，不绕过默认不存 Secret 的安全语义
 - **多选批量**：复选框多选（表头三态全选），批量删除（服务端批量接口，1000 key/请求分块下发 + 进度浮窗 + 可取消）、批量下载（2 路并发、进度浮窗、可取消，单文件失败自动断点续传）
 - **目录删除是真删**：对象存储没有实体目录，目录只是分隔符折叠出的逻辑前缀。这里删除目录会先统计对象数并在确认框中明示，再流式递归清空其下全部对象（列举一页删一页，阿里云 `DeleteObjects` / MinIO `RemoveObjects` 批量删），不设数量上限，任意大小目录都能删，不会出现「提示已删除、目录却还在」的假成功
@@ -55,6 +60,20 @@
 
 - **插件商店**：提交 `t8y2/dbx-store` 审核中，通过后可在 DBX 插件商店安装
 - **手动安装**：从 [Releases](https://github.com/huangqiang008/dbx-object-storage/releases) 下载对应平台的包：`com.object.browser-x.y.z-windows-x64.dbxp`（Windows）、`com.object.browser-x.y.z-darwin-arm64.dbxp`（macOS Apple Silicon）、`com.object.browser-x.y.z-darwin-x64.dbxp`（macOS Intel）。插件中心会自动按本机架构选择。
+
+## 插件快捷入口（显示 / 隐藏）
+
+1.2.1 起在 `manifest.json` 显式声明了 `command`（`open-workbench` → `com.object.browser.main`）和 `menus`（`appToolbar` + `default_visible: true`，另加 `commandPalette`）。因此插件会出现在 **插件中心 → 设置 → 全局配置 → 显示的插件** 列表里，可像其他插件一样开关显示，并有一个快捷图标一键打开工作台、在命令面板里也能搜到。
+
+**为什么之前没有**：DBX 对声明了 `connection-provider` 的插件，不会自动把它的 workbench 加进插件快捷栏（宿主 `collectPluginShortcuts` 只给「非连接型」插件补 workbench 入口）；连接型插件必须显式声明全局 `command`，宿主才承认这个入口。这是宿主侧设计，不是本插件漏配 UI。
+
+**新建连接入口不受影响**：宿主「新建连接」对话框的插件类型列表来自 `connection-provider` 贡献（`ConnectionDialog.vue` 的 `pluginConnectionProviders` → `listConnectionProviders()`），与 `command` / `menus` 是两条独立的贡献链。已安装详情页里的「+ 新建」按钮同理（`PluginContributionsPanel.vue` 的 `createConnection`）。加快捷入口不会顶掉它。
+
+三个约束：
+
+- `engines.dbx` 为 `>=0.6.21`——这是宿主 Rust 侧 `PluginContribution` 枚举首次包含 `Command` / `Menus` 变体的版本（v0.6.20 及更早遇到未知 contribution type 会导致整个 manifest 反序列化失败，**插件会被判不兼容，连新建连接里都找不到**）。不要把门槛抬到实际不需要的更高版本：宿主的兼容性检查会过滤掉 `compatibility.compatible === false` 的插件的全部贡献，包括连接提供者。
+- 插件快捷栏的「显示 / 隐藏」设置面板是 v0.6.24 之后才逐步完善的；0.6.21~0.6.23 的宿主能正常加载插件并使用新建连接，只是没有那个开关。
+- 从快捷图标打开时宿主不下发连接上下文，工作台会停在本机记住的连接表单（需点「连接」）；使用宿主托管连接时，请照旧从连接树打开，凭据由宿主注入。
 
 ## 连接配置
 
@@ -120,9 +139,11 @@ node_modules/.bin/esbuild o3dv-src/engine/main.js --bundle --format=iife --globa
 │   ├── driver_aliyun.go   #   阿里云 OSS 原生实现
 │   ├── driver_s3.go       #   S3 兼容实现（V1 marker 分页语义对齐阿里云）
 │   ├── main.go            #   JSON-RPC 分发
+│   ├── rpc_tasks.go       #   传输任务记录落盘（tasks.jsonl，append/list/clear + 滚动截断）
 │   └── oss.go             #   RPC handlers（list/read/write/delete/upload/presign/save...）
 ├── ui/                    # 沙箱 webview 前端（原生 JS，无框架）
 │   ├── core.js            #   共享核心层：state / els / invoke / 通用弹窗 / OB.shared 容器
+│   ├── tasks.js           #   传输任务中心：任务记录落盘、历史查看、下载失败重试
 │   ├── conn.js            #   连接管理：连接表单、已保存连接、只读守卫、配置持久化
 │   ├── browse.js          #   浏览：分页虚拟化、排序、多选、文件图标、快捷键、列宽拖拽
 │   ├── batch.js           #   批量操作：删除 / 移动 / 复制 / 重命名 + 目标目录树选择器
@@ -155,7 +176,7 @@ node_modules/.bin/esbuild o3dv-src/engine/main.js --bundle --format=iife --globa
 
 ### 前端模块化约定
 
-UI 曾是单文件 `main.js`（4500+ 行），现已按功能域拆成 9 个模块。改动前先看这三条约定：
+UI 曾是单文件 `main.js`（4500+ 行），现已按功能域拆成 10 个模块。改动前先看这三条约定：
 
 1. **必须用经典 `<script src>`，不能用 ES Module。** 宿主把插件 UI 放在
    `sandbox="allow-scripts"`（无 `allow-same-origin`）的 iframe 里，文档 origin 为 `null`；
@@ -194,6 +215,12 @@ node --test tests/ui-smoke.test.js
 
 # 前端：纯函数单测（Node 内置 test runner，零外部依赖）
 node --test tests/rename_rule.test.js
+
+# manifest 贡献声明与版本号四处同步校验
+node --test tests/manifest.test.js
+
+# 分页累积引擎（扫描全部并排序）单测
+node --test tests/scan.test.js
 ```
 
 ### 关键设计
@@ -214,7 +241,7 @@ node --test tests/rename_rule.test.js
    |---|---|
    | `manifest.json` | `version` |
    | `backend/oss.go` | `const pluginVersion` |
-   | `ui/main.js` | `const BUILD` |
+   | `ui/core.js` | `OB.BUILD`（模块化后不再是 `ui/main.js`） |
    | `README.md` | 顶部版本徽章 |
 
    然后在目标平台本机执行 `dbx-plugin package .` 重新打包（原生 sidecar 不支持跨平台打包）

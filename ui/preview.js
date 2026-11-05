@@ -460,7 +460,15 @@
     releasePvObjectUrl();
     // 失败后不应残留编辑/保存按钮
     exitEditMode();
-    OB.els.pvBody.innerHTML = `<div class="pv-fail">${esc(msg)}</div>`;
+    // 预览失败时给出「下载该文件」兜底入口（文件管理器惯例）：
+    // 不支持预览 / Worker 不可用 / 加载失败都适用；目录预览不涉及。
+    const dlItem = OB.shared.pvCurrentItem;
+    const dlBtn = (dlItem && !dlItem.isDir)
+      ? `<div class="pv-fail-actions"><button type="button" class="pv-fail-btn" id="pvFailDl">${esc(I18N.t("preview.dlBtn"))}</button></div>`
+      : "";
+    OB.els.pvBody.innerHTML = `<div class="pv-fail">${esc(msg)}${dlBtn}</div>`;
+    const dlEl = $("pvFailDl");
+    if (dlEl) dlEl.onclick = () => { const x = OB.shared.pvCurrentItem; if (x) OB.doDownload(x); };
   }
 
   function closePreview() {

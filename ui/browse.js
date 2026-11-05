@@ -10,9 +10,10 @@
 (function (OB) {
   "use strict";
 
-  // 纯工具：各模块自行从 window 取（utils.js / icons.js 是纯函数包，无状态依赖）
+  // 纯工具：各模块自行从 window 取（utils.js / icons.js / scan.js 是纯函数包，无状态依赖）
   const { esc, formatSize, fmtTime } = window.Utils;
   const svg = window.ICONS.svg;
+  const Scan = window.Scan;
   const $ = (id) => document.getElementById(id);
 
   // ---------- 浏览（bucket 感知 + 分页 + 虚拟化 + 前缀过滤） ----------
@@ -38,6 +39,8 @@
     const gen = OB.shared.listGen;
     OB.state.loading = true;
     OB.state.loadError = "";
+    // 新目录/刷新：复位全量扫描的截断标记（上一目录的扫描结果不再适用）
+    if (!marker) OB.state.scanTruncated = false;
     if (!marker && !OB.state.items.length) { ensureListExtras(); if (OB.shared.skelNode) OB.shared.skelNode.classList.remove("hidden"); }
     OB.setStatus(marker ? I18N.t("status.loadingMore") : I18N.t("status.loading"));
     try {
@@ -105,6 +108,8 @@
       // 扫描「公共读」徽标（若用户开启了该开关）：仅拉取尚未查过的对象，
       // 异步进行、不阻塞浏览；出错仅影响徽标，不中断列表。
       OB.refreshAcl();
+      // 首页加载成功后记录最近访问（fire-and-forget，失败静默）
+      if (!marker) void OB.rememberRecent();
       OB.setStatus(OB.state.hasMore
         ? I18N.t("status.loadedMore", { n: OB.state.items.length })
         : I18N.t("status.loaded", { n: OB.state.items.length }));
@@ -346,10 +351,104 @@
   OB.renderList = function renderList() {
     OB.els.listContent.style.height = (OB.state.items.length * OB.shared.ROW_H) + "px";
     // 路径栏计数只表示当前已加载条数；「还有更多」仅由状态栏在真正存在下一页时提示
-    OB.els.countLabel.textContent = I18N.t("status.loaded", { n: OB.state.items.length });
+    OB.els.countLabel.textContent = I18N.t("status.loaded", { n: OB.state.items.length })
+      + (OB.partialSort() ? I18N.t("scanAll.partialTag") : "");
+    OB.updateScanAllBtn();
     OB.updateBatchUI();
     OB.renderVisible();
   };
+
+  // ---------- 全量扫描排序（1.3，A2） ----------
+  // 排序作用于「已加载的 items」（见 sortItems 注释）：点「大小/时间」排序时用户
+  // 预期的是全目录排序，而分页视图只给前几页——这是静默错误结果。这里提供显式的
+  // 「扫描全部并排序」：用当前分页接口把当前 prefix 的所有页拉完（不递归子目录，
+  // 递归是深度搜索的语义），上限 2 万（与深度搜索一致），可取消、有进度。
+
+  // partialSort 当前排序/筛选结果是否可能只是「部分数据」：排序键非名称（名称
+  // 排序同样是局部的，但对用户决策影响小，不常驻标注避免噪音）、或过滤生效、
+  // 或上次全量扫描触达上限——三者任一且数据确未拉全时，计数旁持续提示。
+  OB.partialSort = function partialSort() {
+    if (OB.state.scanTruncated) return true;
+    if (!OB.state.hasMore) return false;
+    return OB.state.sortKey !== "name" || OB.filterActive();
+  };
+
+  // updateScanAllBtn 显隐：仅排序键非名称且确实还有未加载页时出现。
+  OB.updateScanAllBtn = function updateScanAllBtn() {
+    const el = OB.els.scanAllBtn;
+    if (!el) return;
+    const show = !OB.state.scanAllRunning
+      && OB.state.hasMore
+      && OB.state.sortKey !== "name"
+      && (OB.state.bucket || OB.state.prefix !== "");
+    el.classList.toggle("hidden", !show);
+  };
+
+  // collectAllSorted 把当前前缀的所有页拉完（上限 2 万）后按当前排序键重排。
+  // 复用 Scan.collect 纯逻辑；目录切换（listGen 变化）即取消并静默丢弃。
+  OB.collectAllSorted = async function collectAllSorted() {
+    if (OB.state.scanAllRunning) return;
+    if (!OB.state.bucket && OB.state.prefix === "") return; // 根目录是桶列表，无分页
+    OB.state.scanAllRunning = true;
+    OB.updateScanAllBtn();
+    const gen = OB.shared.listGen;
+    OB.setStatus(I18N.t("scanAll.running", { n: 0 }));
+    try {
+      const res = await Scan.collect({
+        // 扫描场景用大页（1000）减少请求数；与 loadPage 的分页大小互不影响
+        fetchPage: async (marker) => {
+          const r = await OB.invoke("objects/list", {
+            bucket: OB.state.bucket,
+            prefix: OB.state.prefix + (OB.state.search || ""),
+            delimiter: "/",
+            marker: marker || "",
+            maxKeys: 1000,
+          });
+          if (gen !== OB.shared.listGen) throw new Error("stale-scan");
+          return {
+            items: (r.items || []).map((it) => ({
+              name: it.name,
+              isDir: !!it.is_dir || /\/$/.test(it.name),
+              size: it.size || 0,
+              mime: it.mime || "",
+              modified: it.modified || "",
+            })),
+            isTruncated: !!r.is_truncated,
+            nextMarker: r.next_marker || "",
+          };
+        },
+        limit: 20000,
+        onProgress: (n) => OB.setStatus(I18N.t("scanAll.running", { n })),
+        isCancelled: () => gen !== OB.shared.listGen,
+      });
+      if (res.cancelled) return; // 目录已切换：静默丢弃，新目录有自己的加载流程
+      // 灌入全量：先经 setItems 更新「未过滤全量快照」（core.js 访问器维护），
+      // 再按既有语义写视图（目录不过滤，文件过 filterMatch），最后统一排序渲染
+      OB.setItems(res.items.slice());
+      OB.shared.allItems = res.items.slice();
+      OB.state.items = res.items.filter((it) => it.isDir || OB.filterMatch(it));
+      OB.state.isTruncated = res.truncated; // 达上限时后续不再有可靠的续页 marker
+      OB.state.nextMarker = "";
+      OB.state.hasMore = false;
+      OB.state.scanTruncated = res.truncated;
+      OB.applySort();
+      OB.renderList();
+      OB.setStatus(res.truncated
+        ? I18N.t("scanAll.doneTruncated", { n: res.items.length })
+        : I18N.t("scanAll.done", { n: res.items.length }));
+    } catch (e) {
+      if (String((e && e.message) || e) !== "stale-scan") {
+        OB.setStatus(I18N.t("scanAll.failed", { e: OB.truncateErr ? OB.truncateErr(String((e && e.message) || e)) : String((e && e.message) || e) }), true);
+      }
+    } finally {
+      OB.state.scanAllRunning = false;
+      OB.updateScanAllBtn();
+    }
+  };
+
+  if (OB.els.scanAllBtn) {
+    OB.els.scanAllBtn.onclick = () => void OB.collectAllSorted();
+  }
 
   // ---------- F3 多选批量 ----------
   // 复选框是自绘 span（非原生 input）：虚拟化重绘时状态由 state.sel 驱动，
@@ -502,6 +601,15 @@
       if (failed.length && !cancelled) OB.failDlCard(text);
       else OB.finishDlCard(text, cancelled);
       OB.setStatus(text, !!failed.length);
+      // 记入任务中心（B1）：删除只记录不提供重试（重复删除有副作用）
+      OB.recordTask({
+        type: "delete",
+        bucket: OB.state.bucket,
+        keys: sel,
+        ok: done,
+        failed: failed.map((x) => ({ key: x.path, error: x.error })),
+        cancelled,
+      });
     } catch (e) {
       OB.failDlCard(I18N.t("delete.fail") + (e.message || e));
     }
@@ -517,6 +625,138 @@
     s = String(s || "").split("\n")[0].trim();
     return s.length > 120 ? s.slice(0, 120) + "…" : s;
   };
+
+  // ---------- 路径书签 / 最近访问（1.3，C4） ----------
+  // 深层目录每次从根点进去太痛：书签显式收藏（上限 20），最近访问自动记录（上限 10）。
+  // 都存插件 storage（几 KB 量级）；跳转复用 navigate/桶进入语义。
+  const BM_KEY = "bookmarks";
+  const RECENT_KEY = "recentPaths";
+  const BM_MAX = 20;
+  const RECENT_MAX = 10;
+
+  function loadPathList(key) {
+    const store = window.dbxPlugin && window.dbxPlugin.storage;
+    if (!store || typeof store.get !== "function") return Promise.resolve([]);
+    return Promise.resolve(store.get(key)).then((v) => (Array.isArray(v) ? v : [])).catch(() => []);
+  }
+  function savePathList(key, list) {
+    const store = window.dbxPlugin && window.dbxPlugin.storage;
+    if (!store || typeof store.set !== "function") return Promise.resolve();
+    return Promise.resolve(store.set(key, list)).catch(() => { /* 存储不可用时仅本次会话生效 */ });
+  }
+  function pathLabel(p) {
+    return (p.bucket || "") + "/" + (p.prefix || "");
+  }
+
+  // rememberRecent 进入新位置后记录最近访问（loadPage 首页成功后调用，fire-and-forget）。
+  // 根目录（桶列表视图）不记——那里没有「路径」语义。
+  OB.rememberRecent = async function rememberRecent() {
+    if (!OB.state.bucket) return;
+    const cur = { bucket: OB.state.bucket, prefix: OB.state.prefix, ts: Date.now() };
+    const list = await loadPathList(RECENT_KEY);
+    const next = [cur].concat(list.filter((p) => !(p.bucket === cur.bucket && p.prefix === cur.prefix))).slice(0, RECENT_MAX);
+    await savePathList(RECENT_KEY, next);
+  };
+
+  // jumpTo 跳转到书签/最近位置。跨桶仅在当前连接不限桶（根目录可列桶）时放行——
+  // 连接绑定了特定桶时，另一个桶大概率不可达，直接提示而不是让用户撞 SDK 报错。
+  OB.jumpTo = function jumpTo(p) {
+    if (!p) return;
+    if (OB.state.bucket && p.bucket && p.bucket !== OB.state.bucket) {
+      OB.setStatus(I18N.t("bookmark.crossBucket"), true);
+      return;
+    }
+    if (p.bucket !== OB.state.bucket) OB.state.bucket = p.bucket;
+    OB.state.prefix = p.prefix || "";
+    OB.state.search = "";
+    OB.els.searchInput.value = "";
+    OB.resetPaging();
+    OB.loadPage("");
+  };
+
+  OB.addBookmark = async function addBookmark() {
+    if (!OB.state.bucket) { OB.setStatus(I18N.t("bookmark.needBucket"), true); return; }
+    const cur = { bucket: OB.state.bucket, prefix: OB.state.prefix, ts: Date.now() };
+    const list = await loadPathList(BM_KEY);
+    if (list.some((p) => p.bucket === cur.bucket && p.prefix === cur.prefix)) {
+      OB.setStatus(I18N.t("bookmark.exists"));
+      return;
+    }
+    await savePathList(BM_KEY, [cur].concat(list).slice(0, BM_MAX));
+    OB.setStatus(I18N.t("bookmark.added"));
+  };
+
+  async function removeBookmark(p) {
+    const list = await loadPathList(BM_KEY);
+    await savePathList(BM_KEY, list.filter((x) => !(x.bucket === p.bucket && x.prefix === p.prefix)));
+    OB.setStatus(I18N.t("bookmark.removed"));
+  }
+
+  // openBookmarkMenu 书签/最近访问下拉（复用 .ctx-menu 样式与 closeCtxMenu 关闭逻辑）。
+  // 书签项右键 = 删除该条；「添加书签」收集当前 bucket+prefix。
+  OB.openBookmarkMenu = async function openBookmarkMenu(anchor) {
+    closeCtxMenu();
+    const results = await Promise.all([loadPathList(BM_KEY), loadPathList(RECENT_KEY)]);
+    const bms = results[0];
+    const recents = results[1];
+    const m = document.createElement("div");
+    m.id = "ctxMenu";
+    m.className = "ctx-menu";
+    const item = (p, icon, kind) => {
+      const label = esc(pathLabel(p));
+      return `<div class="ctx-item" data-bm-jump="1" data-bm-kind="${kind}" data-bucket="${esc(p.bucket)}" data-prefix="${esc(p.prefix)}" title="${label}">${ICONS.svg(icon, 14)}<span>${label}</span></div>`;
+    };
+    let html = "";
+    if (bms.length) {
+      html += `<div class="bm-group">${esc(I18N.t("bookmark.group"))}</div>`;
+      for (const p of bms) html += item(p, "star", "bm");
+    }
+    if (recents.length) {
+      html += `<div class="bm-group">${esc(I18N.t("bookmark.recentGroup"))}</div>`;
+      for (const p of recents) html += item(p, "clock", "recent");
+    }
+    if (!bms.length && !recents.length) {
+      html += `<div class="bm-empty">${esc(I18N.t("bookmark.empty"))}</div>`;
+    }
+    html += '<div class="ctx-sep"></div>';
+    html += `<div class="ctx-item" data-bm-add="1">${ICONS.svg("star", 14)}<span>${esc(I18N.t("bookmark.add"))}</span></div>`;
+    m.innerHTML = html;
+    document.body.appendChild(m);
+    // 弹出后按实际尺寸钳位到视口内（与 openCtxMenu 同策略），贴着锚点按钮下沿展开
+    const r = m.getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
+    m.style.left = Math.max(4, Math.min(rect.left, window.innerWidth - r.width - 8)) + "px";
+    m.style.top = Math.max(4, Math.min(rect.bottom + 4, window.innerHeight - r.height - 8)) + "px";
+    OB.shared.ctxMenuEl = m;
+    m.addEventListener("click", (e) => {
+      const jump = e.target.closest("[data-bm-jump]");
+      if (jump) {
+        closeCtxMenu();
+        OB.jumpTo({ bucket: jump.getAttribute("data-bucket"), prefix: jump.getAttribute("data-prefix") });
+        return;
+      }
+      if (e.target.closest("[data-bm-add]")) {
+        closeCtxMenu();
+        void OB.addBookmark();
+      }
+    });
+    // 书签右键删除（最近访问不提供删除——滚动自然淘汰）
+    m.addEventListener("contextmenu", (e) => {
+      const jump = e.target.closest('[data-bm-jump][data-bm-kind="bm"]');
+      if (!jump) return;
+      e.preventDefault();
+      closeCtxMenu();
+      void removeBookmark({ bucket: jump.getAttribute("data-bucket"), prefix: jump.getAttribute("data-prefix") });
+    });
+  };
+
+  const bookmarkBtn = $("bookmarkBtn");
+  if (bookmarkBtn) {
+    bookmarkBtn.onclick = () => {
+      if (OB.shared.ctxMenuEl) { closeCtxMenu(); return; } // 再点一次关闭
+      void OB.openBookmarkMenu(bookmarkBtn);
+    };
+  }
 
   // ---------- 文件类型图标 ----------
   // svg() 与图标表见 icons.js。
@@ -664,12 +904,41 @@
     const el = document.activeElement;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return false;
     if (OB.inFloatingLayer(el)) return false;
-    for (const id of ["connectOverlay", "modal", "copyModal", "previewOverlay", "dirTreeModal", "renameModal", "metaModal", "filterModal"]) {
+    for (const id of ["connectOverlay", "modal", "copyModal", "previewOverlay", "dirTreeModal", "renameModal", "metaModal", "filterModal", "tasksOverlay"]) {
       const n = $(id);
       if (n && !n.classList.contains("hidden")) return false;
     }
     const bv = $("browserView");
     return !!(bv && !bv.classList.contains("hidden"));
+  }
+  // moveFocus 键盘移动高亮行（↑/↓）。extend 为 true 时（Shift+方向键）
+  // 同时把锚点到新位置的区间加入勾选集——资源管理器式的连选。
+  // 移动后滚动保证当前行可见（虚拟列表按 scrollTop 渲染）。
+  function moveFocus(delta, extend) {
+    const n = OB.state.items.length;
+    if (!n) return;
+    let idx = OB.state.selectedIndex;
+    idx = idx < 0 ? (delta > 0 ? 0 : n - 1) : Math.min(n - 1, Math.max(0, idx + delta));
+    if (idx === OB.state.selectedIndex && !extend) return;
+    if (extend) {
+      const anchor = OB.state.selAnchor >= 0 ? OB.state.selAnchor : idx;
+      const a = Math.min(anchor, idx);
+      const b = Math.max(anchor, idx);
+      for (let i = a; i <= b; i++) {
+        const x = OB.state.items[i];
+        if (x) OB.state.sel.add(x.name);
+      }
+      OB.state.selAnchor = idx;
+      OB.updateBatchUI();
+    }
+    OB.state.selectedIndex = idx;
+    const top = idx * OB.shared.ROW_H;
+    const list = OB.els.list;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (top + OB.shared.ROW_H > list.scrollTop + list.clientHeight) {
+      list.scrollTop = top + OB.shared.ROW_H - list.clientHeight;
+    }
+    OB.renderVisible();
   }
   document.addEventListener("keydown", (e) => {
     if (!shortcutGuard()) return;
@@ -686,9 +955,32 @@
       OB.els.searchInput.select();
       return;
     }
+    // 剪贴板：Ctrl+C/X 复制/剪切当前勾选（无勾选取高亮行），Ctrl+V 粘贴到当前目录
+    if (ctrl && !e.shiftKey && !e.altKey && (e.key === "c" || e.key === "C" || e.key === "x" || e.key === "X")) {
+      e.preventDefault();
+      OB.clipSelected(e.key === "x" || e.key === "X");
+      return;
+    }
+    if (ctrl && !e.shiftKey && !e.altKey && (e.key === "v" || e.key === "V")) {
+      e.preventDefault();
+      OB.doPaste();
+      return;
+    }
     if (ctrl || e.altKey || e.metaKey) return;
     const it = OB.state.items[OB.state.selectedIndex];
     switch (e.key) {
+      case "ArrowDown":
+      case "ArrowUp":
+        e.preventDefault();
+        moveFocus(e.key === "ArrowDown" ? 1 : -1, e.shiftKey);
+        return;
+      case " ":
+        // 空格快速预览：目录进入，文件走预览（不支持的格式无动作）
+        if (!it) return;
+        e.preventDefault();
+        if (it.isDir) OB.enterDir(it);
+        else if (OB.previewKind(it.name)) OB.openPreview(it);
+        return;
       case "Enter":
         if (!it) return;
         e.preventDefault();

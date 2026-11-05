@@ -1,6 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <rect width="64" height="64" rx="12" fill="#2563eb"/>
-  <path d="M16 22h32v22a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V22z" fill="#ffffff"/>
-  <path d="M16 22l6-8h20l6 8H16z" fill="#bfdbfe"/>
-  <circle cx="40" cy="36" r="6" fill="#2563eb"/>
+  <defs>
+    <linearGradient id="obBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset=".55" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#1e40af"/>
+    </linearGradient>
+  </defs>
+  <!-- 背景：蓝渐变圆角方块 -->
+  <rect width="64" height="64" rx="14" fill="url(#obBg)"/>
+  <!-- 云朵：双圆 + 胶囊底 -->
+  <circle cx="24.5" cy="23" r="8.5" fill="#ffffff"/>
+  <circle cx="37.5" cy="20" r="11" fill="#ffffff"/>
+  <rect x="16" y="22" width="32.5" height="9.5" rx="4.75" fill="#ffffff"/>
+  <!-- 云下数据条：呼应「存储」语义 -->
+  <rect x="19.5" y="39.5" width="25" height="4.5" rx="2.25" fill="#ffffff"/>
+  <rect x="24.5" y="48.5" width="15" height="4.5" rx="2.25" fill="#bfdbfe"/>
 </svg>

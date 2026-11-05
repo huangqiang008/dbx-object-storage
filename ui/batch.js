@@ -171,6 +171,7 @@
     // 单文件失败重试时自动从 .part 断点续传。
     const DL_CONC = 2;
     let done = 0, fail = 0, cancelled = false, next = 0, firstErr = "";
+    const failed = []; // {key, error, rel}：任务中心的失败明细（重试需要 rel 复刻落盘位置）
     const worker = async () => {
       for (;;) {
         if (OB.shared.dl.cancelled) { cancelled = true; return; }
@@ -188,7 +189,9 @@
           done++;
         } catch (e) {
           fail++;
-          if (!firstErr) firstErr = String((e && e.message) || e);
+          const msg = String((e && e.message) || e);
+          if (!firstErr) firstErr = msg;
+          failed.push({ key: it.name, error: msg, rel: downloadRelPath(it.name) });
         }
         OB.dlProgressItems(done + fail, items.length);
       }
@@ -210,6 +213,16 @@
       OB.finishDlCard(text);
     }
     OB.setStatus(I18N.t("batch.downloadDir") + dir);
+    // 记入任务中心（B1）：下载类失败项可从任务中心一键重试
+    OB.recordTask({
+      type: "download",
+      bucket: OB.state.bucket,
+      dir,
+      keys: items.map((it) => it.name),
+      ok: done,
+      failed,
+      cancelled,
+    });
   };
 
   // downloadRelPath 计算对象 key 相对落盘根目录的路径（1.1）。
@@ -338,6 +351,128 @@
     else OB.finishDlCard(text, cancelled);
     OB.setStatus(text, !!failed.length);
     if (done > 0) { OB.resetPaging(); OB.loadPage(""); }
+    // 记入任务中心（B1）：移动/复制只记录不提供重试（重复执行有副作用）
+    OB.recordTask({
+      type: mode === "move" ? "move" : "copy",
+      bucket: OB.state.bucket,
+      dstBucket,
+      keys: sel,
+      ok: done,
+      failed,
+      cancelled,
+    });
+  };
+
+  // ---------- 剪贴板（Ctrl+C / X / V，文件管理器惯例） ----------
+  // 记录来源（桶 + 前缀 + 名单），粘贴时把名单搬进「当前目录」。
+  // 粘贴管线复用 doBatchTransfer 的接口选择：同桶 move/copy，跨桶 *_across，
+  // 目录 copy_dir / move_dir / copy_dir_across，冲突由后端 ensureNotExists 拦截。
+  OB.shared.clipboard = null; // { cut: bool, bucket, prefix, names: [] }
+
+  // clipSelected 复制/剪切当前勾选项（无勾选时退化为高亮行）。根目录（桶列表）不参与。
+  OB.clipSelected = function clipSelected(cut) {
+    if (!OB.state.bucket) return;
+    const names = OB.state.sel.size
+      ? Array.from(OB.state.sel)
+      : (OB.state.selectedIndex >= 0 && OB.state.items[OB.state.selectedIndex]
+        ? [OB.state.items[OB.state.selectedIndex].name] : []);
+    if (!names.length) return;
+    OB.shared.clipboard = { cut: !!cut, bucket: OB.state.bucket, prefix: OB.state.prefix || "", names };
+    OB.setStatus(I18N.t(cut ? "kb.cutDone" : "kb.copyDone", { n: names.length }));
+  };
+
+  // doPaste 粘贴剪贴板名单到当前目录（Ctrl+V）。剪切在完成后清空剪贴板，
+  // 避免源已不存在时的二次粘贴。
+  OB.doPaste = async function doPaste() {
+    const clip = OB.shared.clipboard;
+    if (!clip || !clip.names.length) { OB.setStatus(I18N.t("kb.clipEmpty"), true); return; }
+    if (!OB.state.bucket) { OB.setStatus(I18N.t("kb.needBucket"), true); return; }
+    if (clip.bucket === OB.state.bucket && (clip.prefix || "") === (OB.state.prefix || "")) {
+      OB.setStatus(I18N.t("kb.sameDir"), true); return;
+    }
+    if (!OB.guardWritable()) return;
+    const srcBucket = clip.bucket;
+    const crossBucket = srcBucket !== OB.state.bucket;
+    const target = OB.state.prefix || "";
+    const dirs = [], files = [];
+    for (const name of clip.names) (name.endsWith("/") ? dirs : files).push(name);
+    const total = files.length + dirs.length;
+    const ok = await OB.openConfirm(I18N.t("modal.confirmTitle"),
+      I18N.t(clip.cut ? "batch.moveTip" : "batch.copyTip", { n: total, t: target || "/" }));
+    if (!ok) return;
+    OB.openDlCard("", clip.cut ? "move" : "copy");
+    OB.dlProgressItems(0, total);
+    let done = 0, cancelled = false;
+    const failed = [];
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        if (OB.shared.dl.cancelled) { cancelled = true; return; }
+        const i = next++;
+        if (i >= files.length) return;
+        const name = files[i];
+        const base = name.split("/").filter(Boolean).pop() || name;
+        if (!cancelled) $("dlName").textContent = base;
+        try {
+          const method = clip.cut
+            ? (crossBucket ? "objects/move_across" : "objects/move")
+            : (crossBucket ? "objects/copy_across" : "objects/copy");
+          const payload = crossBucket
+            ? { bucket: srcBucket, dstBucket: OB.state.bucket, from: name, to: target + base }
+            : { bucket: srcBucket, from: name, to: target + base };
+          await OB.invoke(method, payload, { timeoutMs: 600000 });
+          done++;
+        } catch (e) {
+          failed.push({ path: name, error: String((e && e.message) || e) });
+        }
+        OB.dlProgressItems(done + failed.length, total);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, files.length) }, worker));
+    for (const dirName of dirs) {
+      if (OB.shared.dl.cancelled) { cancelled = true; break; }
+      const dirBase = dirName.split("/").filter(Boolean).pop() || dirName.replace(/\/$/, "");
+      $("dlName").textContent = I18N.t("batch.progressDir", { name: OB.displayName({ name: dirName }) });
+      try {
+        if (crossBucket) {
+          await OB.invoke("objects/copy_dir_across",
+            { bucket: srcBucket, dstBucket: OB.state.bucket, from: dirName, to: target + dirBase },
+            { timeoutMs: 600000 }
+          );
+          if (clip.cut) {
+            await OB.invoke("objects/delete_dir", { bucket: srcBucket, path: dirName }, { timeoutMs: 600000 });
+          }
+        } else {
+          await OB.invoke(clip.cut ? "objects/move_dir" : "objects/copy_dir",
+            { bucket: srcBucket, from: dirName, to: target + dirBase },
+            { timeoutMs: 600000 }
+          );
+        }
+        done++;
+      } catch (e) {
+        failed.push({ path: dirName, error: String((e && e.message) || e) });
+      }
+      OB.dlProgressItems(done + failed.length, total);
+    }
+    $("dlName").textContent = "";
+    if (clip.cut && !cancelled) OB.shared.clipboard = null;
+    let text = I18N.t(clip.cut ? "batch.moveDone" : "batch.copyDone", { n: done });
+    if (failed.length) text += " · " + I18N.t("batch.failed", { n: failed.length }) + " · " + I18N.t("batch.firstErr", { e: OB.truncateErr(failed[0].error) });
+    if (cancelled) text += " · " + I18N.t("batch.cancelled", { n: done, r: total - done - failed.length });
+    if (failed.length && !cancelled) OB.failDlCard(text);
+    else OB.finishDlCard(text, cancelled);
+    OB.setStatus(text, !!failed.length);
+    if (done > 0) { OB.resetPaging(); OB.loadPage(""); }
+    // 记入任务中心（B1）：剪贴板粘贴同样只记录不提供重试
+    OB.recordTask({
+      type: clip.cut ? "move" : "copy",
+      bucket: srcBucket,
+      dstBucket: OB.state.bucket,
+      keys: clip.names,
+      ok: done,
+      failed: failed.map((x) => ({ key: x.path, error: x.error })),
+      cancelled,
+    });
   };
 
   // ---------- 批量重命名（1.4） ----------

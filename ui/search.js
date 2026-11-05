@@ -63,6 +63,13 @@
     return items.filter(OB.filterMatch);
   }
 
+  // filterActive 过滤条件是否生效（1.3，A2）：供排序标注与全量扫描按钮判断。
+  // filterState 是本模块私有，浏览模块经此只读探测。
+  OB.filterActive = function filterActive() {
+    return filterState.minSize > 0 || filterState.maxSize > 0 ||
+      filterState.days > 0 || filterState.exts.length > 0 || !!filterState.regex;
+  };
+
   function openFilterModal() {
     return new Promise((resolve) => {
       filterResolve = resolve;

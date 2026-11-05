@@ -3,13 +3,13 @@
   "manifest_version": 1,
   "id": "com.object.browser",
   "name": "Object Storage",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "publisher": "huangqiang",
   "description": "Browse and read/write Alibaba Cloud OSS, MinIO and other S3-compatible object storage, with large-directory pagination and list virtualization.",
   "icon": "assets/plugin.svg",
   "source": "https://github.com/huangqiang008/dbx-object-storage",
   "homepage": "https://github.com/huangqiang008/dbx-object-storage",
-  "engines": { "dbx": ">=0.6.0", "host_api": "1" },
+  "engines": { "dbx": ">=0.6.21", "host_api": "1" },
   "permissions": ["host.workbench", "host.storage", "host.events", "host.filesystem"],
   "entrypoints": {
     "ui": { "root": "ui", "entry": "ui/index.html" },
@@ -89,6 +89,38 @@
       "id": "com.object.browser.main",
       "label": "Object Storage",
       "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "command",
+      "id": "com.object.browser.open",
+      "label": "Object Storage",
+      "description": "Open the Object Storage workbench.",
+      "icon": "assets/plugin.svg",
+      "action": {
+        "type": "open-workbench",
+        "workbench": "com.object.browser.main",
+        "presentation": "tab",
+        "context": { "source": "shortcut" }
+      }
+    },
+    {
+      "type": "menus",
+      "id": "com.object.browser.menus",
+      "items": [
+        {
+          "location": "appToolbar",
+          "command": "com.object.browser.open",
+          "group": "navigation",
+          "order": 100,
+          "default_visible": true
+        },
+        {
+          "location": "commandPalette",
+          "command": "com.object.browser.open",
+          "group": "navigation",
+          "order": 100
+        }
+      ]
     }
   ],
   "localizations": {
@@ -124,7 +156,8 @@
             "ca_cert": { "label": "自定义 CA 证书（PEM）", "description": "粘贴服务端 CA 的 PEM 文本（优先于「跳过校验」，仍会验证证书链）。适用于私有 CA 签发的 HTTPS 端点。" }
           }
         },
-        "com.object.browser.main": { "label": "对象存储" }
+        "com.object.browser.main": { "label": "对象存储" },
+        "com.object.browser.open": { "label": "对象存储", "description": "打开对象存储工作台" }
       }
     }
   }

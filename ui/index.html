@@ -37,6 +37,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
         <span data-i18n="public.scanBtn">公开状态</span>
       </button>
+      <button id="tasksBtn" type="button" data-i18n-title="tasks.openTitle" title="传输任务">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+        <span data-i18n="tasks.open">任务</span>
+      </button>
       <input id="fileInput" type="file" multiple hidden />
       <span class="spacer"></span>
       <span id="endpointLabel" class="toolbar-endpoint"></span>
@@ -48,11 +52,15 @@
 
     <div class="pathbar">
       <button id="upBtn" class="path-btn" type="button" data-i18n-title="nav.up" title="向上一级">↑</button>
+      <button id="bookmarkBtn" class="path-btn" type="button" data-i18n-title="bookmark.menuTitle" title="书签 / 最近访问">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></svg>
+      </button>
       <div id="breadcrumb" class="breadcrumb"></div>
       <input id="searchInput" class="search" type="text" data-i18n-placeholder="search.placeholder" placeholder="搜索：输入名称前缀，回车确认；Shift+回车 深度搜索" />
       <button id="searchFilterBtn" type="button" class="mini-btn" data-i18n-title="search.filterTitle" title="搜索过滤条件">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
       </button>
+      <button id="scanAllBtn" class="mini-btn hidden" type="button" data-i18n="scanAll.btn" data-i18n-title="scanAll.btnTitle" title="扫描全部并排序">扫描全部并排序</button>
       <span id="countLabel" class="count"></span>
     </div>
 
@@ -122,25 +130,39 @@
       </div>
 
       <div class="form" id="tab-info">
-        <div class="frow">
-          <label data-i18n="conn.saved">已保存连接</label>
-          <div class="fctrl conn-saved">
-            <select id="savedConnSel"></select>
-            <button id="connSaveBtn" class="mini-btn" type="button" data-i18n="conn.save">保存当前</button>
-            <button id="connDelBtn" class="mini-btn" type="button" data-i18n="conn.del">删除</button>
+        <div id="connTabs" class="conn-tabs" role="tablist">
+          <button type="button" class="conn-tab active" data-pane="paneMain" data-i18n="conn.tab.main">连接信息</button>
+          <button type="button" class="conn-tab" data-pane="paneAdvanced" data-i18n="conn.tab.adv">高级</button>
+        </div>
+
+        <div id="paneMain" class="conn-pane">
+        <div id="shortcutHint" class="shortcut-hint hidden">
+          <div class="shortcut-hint-head">
+            <span class="shortcut-hint-title" data-i18n="shortcut.title">从快捷入口打开</span>
+            <button id="shortcutHintClose" class="mini-btn" type="button" data-i18n="shortcut.dismiss">知道了</button>
           </div>
-          <div class="fhelp" data-i18n="conn.savedHelp">以「名称」为键保存当前表单配置，选中即回填。Secret 仅在勾选「在本机记住 Secret」时一并保存，否则回填后需重输。</div>
+          <div class="shortcut-hint-body">
+            <div class="shortcut-hint-line" data-i18n="shortcut.hostLine">宿主托管的连接不带凭据下发，请从左侧连接树打开对应连接。</div>
+            <div class="shortcut-hint-line" data-i18n="shortcut.sharedLine">注意：所有打开的标签页共用同一个后台连接，在此重新连接会切换其他标签页的连接。</div>
+          </div>
         </div>
         <div class="frow">
           <label data-i18n="field.name">名称</label>
-          <div class="fctrl"><input id="fName" type="text" value="对象存储" /></div>
+          <div class="fctrl"><input id="fName" type="text" value="对象存储（阿里云 OSS / S3 兼容）" /></div>
         </div>
         <div class="frow">
           <label data-i18n="field.provider">存储类型</label>
           <div class="fctrl">
             <select id="fProvider">
               <option value="aliyun" data-i18n="provider.aliyun">阿里云 OSS</option>
-              <option value="s3" data-i18n="provider.s3">S3 兼容（MinIO 等）</option>
+              <option value="tencent-cos" data-i18n="provider.tencent-cos">腾讯云 COS</option>
+              <option value="huawei-obs" data-i18n="provider.huawei-obs">华为云 OBS</option>
+              <option value="aws-s3" data-i18n="provider.aws-s3">AWS S3</option>
+              <option value="minio" data-i18n="provider.minio">MinIO</option>
+              <option value="cloudflare-r2" data-i18n="provider.cloudflare-r2">Cloudflare R2</option>
+              <option value="wasabi" data-i18n="provider.wasabi">Wasabi</option>
+              <option value="backblaze-b2" data-i18n="provider.backblaze-b2">Backblaze B2</option>
+              <option value="s3" data-i18n="provider.s3">其他 S3 兼容服务</option>
             </select>
           </div>
         </div>
@@ -154,41 +176,52 @@
           <div class="fhelp" data-i18n="ak.help">访问密钥标识。建议使用 RAM 子账号 AK，仅授予所需的 OSS 权限。</div>
         </div>
         <div class="frow">
-          <label data-i18n="field.sk">AccessKeySecret <i class="req">*</i></label>
+          <label data-i18n="field.sk">Secret <i class="req">*</i></label>
           <div class="fctrl with-eye">
             <input id="fSk" type="password" autocomplete="off" />
             <button id="skEye" class="icon-btn" type="button" data-i18n-title="sk.eye" aria-label="显示 / 隐藏 Secret"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
           </div>
-          <div class="fhelp" data-i18n="sk.help">访问密钥。默认不保存，每次重开需重新输入；勾选下方选项可在本机记住。</div>
-        </div>
-        <div class="frow">
-          <label data-i18n="field.stsToken">STS Token</label>
-          <div class="fctrl"><input id="fStsToken" type="password" autocomplete="off" /></div>
-          <div class="fhelp" data-i18n="stsToken.help">使用 STS 临时凭证时填写（与临时 AK/SK 成对下发）。留空表示使用长期密钥。</div>
+          <div class="fhelp" data-i18n="sk.help">AccessKeySecret（访问密钥）</div>
         </div>
         <div class="frow">
           <div class="fctrl">
             <label class="remember-line">
-              <span id="fRememberCk" class="ckbox" data-remember="1" role="checkbox" aria-checked="false" tabindex="0"></span>
+              <span id="fRememberCk" class="switch" data-remember="1" role="checkbox" aria-checked="false" tabindex="0"></span>
               <span data-i18n="field.rememberSk">在本机记住 Secret（明文存储）</span>
             </label>
           </div>
           <div class="fhelp" data-i18n="remember.help">Secret 将以明文写入本机插件存储，仅本插件可读。仅建议在个人设备上开启；公共设备请保持关闭。</div>
         </div>
         <div class="frow">
+          <label data-i18n="field.stsToken">STS Token</label>
+          <div class="fctrl with-eye">
+            <input id="fStsToken" type="password" autocomplete="off" />
+            <button id="stsEye" class="icon-btn" type="button" data-i18n-title="sk.eye" aria-label="显示 / 隐藏 STS Token"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+          <div class="fhelp" data-i18n="stsToken.help">使用 STS 临时凭证时填写（与临时 AccessKeyId / Secret 成对下发）。留空表示使用长期密钥。</div>
+        </div>
+        <div class="frow">
+          <label data-i18n="field.endpoint">接入点 <i class="req">*</i></label>
+          <div class="fctrl"><input id="fEndpoint" type="text" placeholder="oss-cn-hangzhou.aliyuncs.com" /></div>
+          <div class="fhelp" id="endpointHelp" data-i18n="endpoint.help">接入点，含协议与端口。例如：阿里云 oss-cn-hangzhou.aliyuncs.com、腾讯云 cos.ap-guangzhou.myqcloud.com、华为云 obs.cn-north-1.myhuaweicloud.com、AWS s3.amazonaws.com、MinIO http://192.168.1.10:9000</div>
+        </div>
+        <div class="frow">
+          <label data-i18n="field.bucket">Bucket</label>
+          <div class="fctrl"><input id="fBucket" type="text" placeholder="my-bucket" /></div>
+          <div class="fhelp" data-i18n="bucket.help">存储桶名称。留空则在连接根目录列出全部存储桶。</div>
+        </div>
+        <div class="frow">
           <div class="fctrl">
             <label class="remember-line">
-              <span id="fReadOnlyCk" class="ckbox" data-readonly="1" role="checkbox" aria-checked="false" tabindex="0"></span>
+              <span id="fReadOnlyCk" class="switch" data-readonly="1" role="checkbox" aria-checked="false" tabindex="0"></span>
               <span data-i18n="field.readOnly">只读模式（禁止上传、改名、删除）</span>
             </label>
           </div>
           <div class="fhelp" data-i18n="readOnly.help">开启后本连接仅可浏览、预览与下载，所有写操作都会被拒绝。适用于生产桶、他人共享的存储空间等不宜改动的环境。</div>
         </div>
-        <div class="frow">
-          <label data-i18n="field.endpoint">接入点 <i class="req">*</i></label>
-          <div class="fctrl"><input id="fEndpoint" type="text" placeholder="oss-cn-hangzhou.aliyuncs.com" /></div>
-          <div class="fhelp" id="endpointHelp">服务地址。华东1：oss-cn-hangzhou.aliyuncs.com；华北2：oss-cn-beijing.aliyuncs.com；华南1：oss-cn-shenzhen.aliyuncs.com；中国香港：oss-cn-hongkong.aliyuncs.com。内网形如 oss-cn-hangzhou-internal.aliyuncs.com。</div>
         </div>
+
+        <div id="paneAdvanced" class="conn-pane hidden">
         <div class="frow hidden" id="rowRegion">
           <label data-i18n="field.region">Region</label>
           <div class="fctrl"><input id="fRegion" type="text" placeholder="us-east-1" /></div>
@@ -196,12 +229,12 @@
         </div>
         <div class="frow hidden" id="rowPathStyle">
           <label data-i18n="field.pathstyle">Path Style</label>
-          <div class="fctrl"><input id="fPathStyle" type="checkbox" /></div>
-          <div class="fhelp" data-i18n="pathstyle.help">以路径形式寻址（http://endpoint/bucket/key）。自建 MinIO 建议勾选。</div>
+          <div class="fctrl"><input id="fPathStyle" class="switch" type="checkbox" /></div>
+          <div class="fhelp" data-i18n="pathstyle.help">以路径形式寻址（http://endpoint/bucket/key）。自建 MinIO 建议开启。</div>
         </div>
         <div class="frow">
           <label data-i18n="field.tlsSkip">跳过 TLS 证书校验</label>
-          <div class="fctrl"><input id="fTlsSkip" type="checkbox" /></div>
+          <div class="fctrl"><input id="fTlsSkip" class="switch" type="checkbox" /></div>
           <div class="fhelp" data-i18n="tlsSkip.help">关闭服务端证书校验，仅用于自签/内网端点。会失去中间人攻击防护，请仅在可信网络使用。</div>
         </div>
         <div class="frow">
@@ -210,14 +243,10 @@
           <div class="fhelp" data-i18n="caCert.help">粘贴服务端 CA 的 PEM 文本（优先于「跳过校验」，仍会验证证书链）。适用于私有 CA 签发的 HTTPS 端点。</div>
         </div>
         <div class="frow">
-          <label data-i18n="field.bucket">Bucket</label>
-          <div class="fctrl"><input id="fBucket" type="text" placeholder="my-bucket" /></div>
-          <div class="fhelp" data-i18n="bucket.help">存储桶名称。留空则在连接根目录列出全部存储桶。</div>
-        </div>
-        <div class="frow">
           <label data-i18n="field.pageSize">分页大小</label>
           <div class="fctrl"><input id="fPageSize" type="number" min="10" max="1000" step="1" value="200" /></div>
           <div class="fhelp" data-i18n="pageSize.help">每页列取对象数（10–1000）。大目录将自动分页加载，不会一次性拉取全量。</div>
+        </div>
         </div>
       </div>
 
@@ -385,6 +414,20 @@
     </div>
   </div>
 
+  <!-- 传输任务中心（B1）：批量传输结果历史 + 下载失败重试 -->
+  <div id="tasksOverlay" class="overlay hidden">
+    <div class="tasks-box">
+      <div class="tasks-head">
+        <span class="tasks-title" data-i18n="tasks.title">传输任务</span>
+        <span class="spacer"></span>
+        <button id="tasksClear" class="tasks-btn" type="button" data-i18n="tasks.clear">清空记录</button>
+        <button id="tasksClose" class="tasks-btn" type="button" data-i18n="dialog.close">关闭</button>
+      </div>
+      <div id="tasksList" class="tasks-list"></div>
+      <div class="tasks-foot" data-i18n="tasks.foot">删除 / 移动 / 复制类任务只记录不提供重试（重复执行有副作用）；下载类失败项可一键重试（断点续传）</div>
+    </div>
+  </div>
+
   <!-- 文件预览浮层（图片/音视频/PDF 用 presign URL；文本/代码/MD 用 objects/read + 高亮） -->
   <div id="previewOverlay" class="overlay hidden">
     <div class="preview-box">
@@ -476,7 +519,9 @@
   <script src="icons.js"></script>
   <script src="rename_rule.js"></script>
   <script src="i18n.js"></script>
+  <script src="scan.js"></script>
   <script src="core.js"></script>
+  <script src="tasks.js"></script>
   <script src="conn.js"></script>
   <script src="browse.js"></script>
   <script src="batch.js"></script>

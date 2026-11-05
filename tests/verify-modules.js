@@ -14,7 +14,7 @@ const fs = require("fs");
 const path = require("path");
 
 const UI = path.join(__dirname, "..", "ui");
-const MODULES = ["core", "conn", "browse", "batch", "search", "meta", "transfer", "preview", "app"];
+const MODULES = ["core", "tasks", "conn", "browse", "batch", "search", "meta", "transfer", "preview", "app"];
 
 // 各模块自行从 window 解构的纯工具（utils.js / icons.js 是纯函数包，无状态依赖）。
 // 它们不是 core 的导出，因此模块内裸调用是对的——检查器必须知道这一点。

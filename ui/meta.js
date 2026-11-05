@@ -81,6 +81,8 @@
           tags = (tr && tr.tags) || {};
         } catch (e) { tags = {}; }
       }
+      // 先关详情面板再开编辑器：两个都是 overlay，叠放会互相遮挡
+      detailModal.classList.add("hidden");
       await OB.openMetaEditor(detailItem, Object.assign({}, st, { tags }));
     } catch (e) {
       OB.setStatus(I18N.t("detail.statFailed") + (e.message || e), true);

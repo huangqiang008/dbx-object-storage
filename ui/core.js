@@ -36,7 +36,7 @@
   // 构建版本号：必须与 manifest.json 的 version 及 backend 的 pluginVersion 一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查"改了却没生效"）。
   // 发版时三处（manifest.json / backend/oss.go / 此处）需一并修改。
-  OB.BUILD = "1.2.0";
+  OB.BUILD = "1.4.0";
 
   OB.COLORS = ["#22c55e", "#eab308", "#f97316", "#ef4444", "#3b82f6", "#a855f7"];
   OB.selectedColor = OB.COLORS[4];
@@ -56,6 +56,10 @@
     loading: false,
     hasMore: false,
     pageSize: 200,
+    // 全量扫描排序（1.3，A2）：scanAllRunning 防重入；scanTruncated 标记
+    // 上一次全量扫描触达上限（结果不含全部对象，计数旁持续显示「仅已加载」标注）。
+    scanAllRunning: false,
+    scanTruncated: false,
     selectedIndex: -1,
     // F3 多选：Set<完整对象 key>。仅桶内浏览时可用（根目录是桶列表，不支持批量操作）。
     sel: new Set(),
@@ -109,6 +113,7 @@
     upBtn: $("upBtn"),
     searchInput: $("searchInput"),
     countLabel: $("countLabel"),
+    scanAllBtn: $("scanAllBtn"),
     colName: $("colName"),
     colSize: $("colSize"),
     colTime: $("colTime"),

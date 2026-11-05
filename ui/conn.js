@@ -15,15 +15,23 @@
   const svg = window.ICONS.svg;
   const $ = (id) => document.getElementById(id);
 
-  // ---------- 存储类型切换（aliyun / s3） ----------
-  // s3 专属行（Region / PathStyle）显隐 + 接入点帮助文案/placeholder 联动。
+  // ---------- 存储类型切换（aliyun / 各 S3 兼容厂商） ----------
+  // manifest 声明了 9 个 provider 预设（与后端 s3ProviderAliases 一致）：
+  // aliyun 走阿里云原生 SDK，其余全部归一化为 S3 协议。
+  // s3 兼容厂商才显示 Region / Path Style；接入点 placeholder 按厂商联动。
+  const ENDPOINT_PLACEHOLDER = {
+    "tencent-cos": "cos.ap-guangzhou.myqcloud.com",
+    "huawei-obs": "obs.cn-north-1.myhuaweicloud.com",
+    "aws-s3": "s3.amazonaws.com",
+    "cloudflare-r2": "https://<account-id>.r2.cloudflarestorage.com",
+    wasabi: "s3.wasabisys.com",
+    "backblaze-b2": "s3.us-west-004.backblazeb2.com",
+  };
   OB.updateProviderUI = function updateProviderUI() {
-    const isS3 = OB.els.fProvider.value === "s3";
+    const isS3 = OB.els.fProvider.value !== "aliyun";
     OB.els.rowRegion.classList.toggle("hidden", !isS3);
     OB.els.rowPathStyle.classList.toggle("hidden", !isS3);
-    const key = isS3 ? "endpoint.help.s3" : "endpoint.help.aliyun";
-    if (OB.els.endpointHelp) OB.els.endpointHelp.textContent = I18N.t(key);
-    OB.els.fEndpoint.placeholder = isS3 ? "http://192.168.1.10:9000" : "oss-cn-hangzhou.aliyuncs.com";
+    OB.els.fEndpoint.placeholder = ENDPOINT_PLACEHOLDER[OB.els.fProvider.value] || (isS3 ? "http://192.168.1.10:9000" : "oss-cn-hangzhou.aliyuncs.com");
   };
   OB.resetPaging = function resetPaging() {
     OB.setItems([]); // 视图与全量快照一并清空（快照见 core.js OB.setItems）
@@ -48,8 +56,7 @@
     if (!el) return;
     el.classList.toggle("on", OB.state.rememberSk);
     el.setAttribute("aria-checked", OB.state.rememberSk ? "true" : "false");
-    // 图标仅在选中时可见（与列表勾选框行为一致）
-    el.innerHTML = svg("check", 11);
+    // switch 样式纯 CSS 绘制（胶囊滑块），无需勾选图标
   };
 
   function toggleRememberSk() {
@@ -74,7 +81,7 @@
     if (!el) return;
     el.classList.toggle("on", OB.state.readOnly);
     el.setAttribute("aria-checked", OB.state.readOnly ? "true" : "false");
-    el.innerHTML = svg("check", 11);
+    // switch 样式纯 CSS 绘制（胶囊滑块），无需勾选图标
   };
 
   function toggleReadOnly() {
@@ -120,7 +127,8 @@
 
   function currentCfg() {
     return {
-      provider: OB.els.fProvider.value === "s3" ? "s3" : "aliyun",
+      // provider 原值下传：后端 s3ProviderAliases 把各厂商归一化为 ProviderS3
+      provider: OB.els.fProvider.value || "aliyun",
       endpoint: OB.els.fEndpoint.value.trim(),
       accessKeyId: OB.els.fAk.value.trim(),
       accessKeySecret: OB.els.fSk.value,
@@ -338,7 +346,9 @@
     if (!c || !c.cfg) return;
     const cfg = c.cfg;
     OB.els.fName.value = c.name;
-    OB.els.fProvider.value = cfg.provider === "s3" ? "s3" : "aliyun";
+    // 回填 provider：旧记录只有 aliyun/s3 两种；新预设值在下拉里不存在时退回通用 s3
+    OB.els.fProvider.value = cfg.provider || "aliyun";
+    if (OB.els.fProvider.selectedIndex < 0) OB.els.fProvider.value = "s3";
     OB.els.fEndpoint.value = cfg.endpoint || "";
     OB.els.fAk.value = cfg.accessKeyId || "";
     OB.els.fSk.value = cfg.accessKeySecret || "";
@@ -417,6 +427,26 @@
     $("skEye").innerHTML = svg(show ? "eyeOff" : "eye", 15);
     $("skEye").title = I18N.t("sk.eye");
   };
+  // STS Token 同款明文切换
+  const stsEye = $("stsEye");
+  if (stsEye && OB.els.fStsToken) {
+    stsEye.onclick = () => {
+      const show = OB.els.fStsToken.type === "password";
+      OB.els.fStsToken.type = show ? "text" : "password";
+      stsEye.innerHTML = svg(show ? "eyeOff" : "eye", 15);
+      stsEye.title = I18N.t("sk.eye");
+    };
+  }
+  // 连接表单 tab 切换（连接信息 / 隧道与代理 / 高级），与宿主弹窗同构
+  document.querySelectorAll("#connTabs .conn-tab").forEach((tab) => {
+    tab.onclick = () => {
+      document.querySelectorAll("#connTabs .conn-tab").forEach((t) => t.classList.toggle("active", t === tab));
+      ["paneMain", "paneAdvanced"].forEach((id) => {
+        const pane = $(id);
+        if (pane) pane.classList.toggle("hidden", id !== tab.getAttribute("data-pane"));
+      });
+    };
+  });
   OB.openConnDialog = function openConnDialog() {
     OB.msg("");
     OB.els.overlay.classList.remove("hidden");

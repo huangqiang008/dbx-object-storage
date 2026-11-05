@@ -167,6 +167,12 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleUploadAbort(req.Params)
 	case "upload/release":
 		return handleUploadRelease(req.Params)
+	case "tasks/append":
+		return handleTasksAppend(req.Params)
+	case "tasks/list":
+		return handleTasksList(req.Params)
+	case "tasks/clear":
+		return handleTasksClear(req.Params)
 	default:
 		return nil, &RPCError{Code: -32601, Message: "method not found: " + req.Method}
 	}
