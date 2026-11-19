@@ -44,15 +44,14 @@ func handleInitialize(params json.RawMessage) (interface{}, *RPCError) {
 	}, nil
 }
 
-// getDriver 取当前已连接的驱动实例（并发安全）。
+// getDriver 取「当前请求所属连接」的驱动实例（并发安全）。
+// 连接 ID 由 dispatch 解析并写入 currentConn，会话隔离见 session.go。
 func getDriver() (StorageDriver, *RPCError) {
-	stateMu.Lock()
-	d := state.driver
-	stateMu.Unlock()
-	if d == nil {
+	s := getSession(currentConn)
+	if s == nil || s.driver == nil {
 		return nil, &RPCError{Code: -32000, Message: "未连接"}
 	}
-	return d, nil
+	return s.driver, nil
 }
 
 // requireWritable 只读连接守卫：宿主在 connection-provider 上把连接标记为
@@ -62,10 +61,8 @@ func getDriver() (StorageDriver, *RPCError) {
 // 而「只读」是连接级别的一次性属性；集中守卫比给每个驱动方法加开关更不易漏。
 // 前端同时会隐藏写入口，但前端只是体验优化，真正的边界在这里。
 func requireWritable() *RPCError {
-	stateMu.Lock()
-	readOnly := state.cfg.ReadOnly
-	stateMu.Unlock()
-	if readOnly {
+	s := getSession(currentConn)
+	if s != nil && s.cfg.ReadOnly {
 		return &RPCError{Code: -32000, Message: "当前连接为只读模式，不能执行写操作"}
 	}
 	return nil

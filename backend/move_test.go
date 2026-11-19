@@ -148,15 +148,7 @@ func TestParseConn_HostShapeKeepsFlatValues(t *testing.T) {
 
 // TestRequireWritable_BlocksWhenReadOnly 只读连接下写操作必须被拒绝。
 func TestRequireWritable_BlocksWhenReadOnly(t *testing.T) {
-	stateMu.Lock()
-	oldCfg, oldDrv := state.cfg, state.driver
-	state.cfg = ConnConfig{ReadOnly: true}
-	stateMu.Unlock()
-	defer func() {
-		stateMu.Lock()
-		state.cfg, state.driver = oldCfg, oldDrv
-		stateMu.Unlock()
-	}()
+	withTestSession(t, ConnConfig{ReadOnly: true}, nil)
 
 	if err := requireWritable(); err == nil {
 		t.Fatalf("只读连接下 requireWritable 应返回错误")
@@ -167,15 +159,7 @@ func TestRequireWritable_BlocksWhenReadOnly(t *testing.T) {
 
 // TestRequireWritable_AllowsWhenWritable 普通连接应放行。
 func TestRequireWritable_AllowsWhenWritable(t *testing.T) {
-	stateMu.Lock()
-	oldCfg, oldDrv := state.cfg, state.driver
-	state.cfg = ConnConfig{ReadOnly: false}
-	stateMu.Unlock()
-	defer func() {
-		stateMu.Lock()
-		state.cfg, state.driver = oldCfg, oldDrv
-		stateMu.Unlock()
-	}()
+	withTestSession(t, ConnConfig{ReadOnly: false}, nil)
 
 	if err := requireWritable(); err != nil {
 		t.Errorf("可写连接不应被拦截: %v", err)
@@ -185,16 +169,8 @@ func TestRequireWritable_AllowsWhenWritable(t *testing.T) {
 // TestWriteHandlersRejectWhenReadOnly 逐个确认写类 handler 都接上了守卫。
 // 直接调用 handler 而非检查源码文本，防止有人加了新 handler 却漏掉守卫。
 func TestWriteHandlersRejectWhenReadOnly(t *testing.T) {
-	stateMu.Lock()
-	oldCfg, oldDrv := state.cfg, state.driver
-	state.cfg = ConnConfig{ReadOnly: true}
-	state.driver = nil // 无驱动时若守卫失效，报错信息会变成「未连接」而非只读拦截
-	stateMu.Unlock()
-	defer func() {
-		stateMu.Lock()
-		state.cfg, state.driver = oldCfg, oldDrv
-		stateMu.Unlock()
-	}()
+	// driver 为 nil：若守卫失效，报错信息会变成「未连接」而非只读拦截
+	withTestSession(t, ConnConfig{ReadOnly: true}, nil)
 
 	cases := []struct {
 		name string

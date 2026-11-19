@@ -192,18 +192,12 @@ func (m *mockDriver) PutFromFileWithClass(bucket, path, filePath, mime, storageC
 
 // ---------- 测试工具 ----------
 
-func withMockDriver(t *testing.T, objs map[string]mockObject) {
+// withMockDriver 在 default 会话安装 mock 驱动并返回它（供直接调驱动方法的测试用）。
+func withMockDriver(t *testing.T, objs map[string]mockObject) *mockDriver {
 	t.Helper()
-	stateMu.Lock()
-	oldCfg, oldDrv := state.cfg, state.driver
-	state.cfg = ConnConfig{Bucket: "b"}
-	state.driver = &mockDriver{objects: objs}
-	stateMu.Unlock()
-	t.Cleanup(func() {
-		stateMu.Lock()
-		state.cfg, state.driver = oldCfg, oldDrv
-		stateMu.Unlock()
-	})
+	d := &mockDriver{objects: objs}
+	withTestSession(t, ConnConfig{Bucket: "b"}, d)
+	return d
 }
 
 func runSave(t *testing.T, dir, key string) (map[string]interface{}, *RPCError) {

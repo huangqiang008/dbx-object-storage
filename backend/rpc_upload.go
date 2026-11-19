@@ -125,12 +125,12 @@ func newUploadID() (string, *RPCError) {
 	return hex.EncodeToString(b), nil
 }
 
-// currentBucket 解析目标桶：入参优先，否则回落连接默认桶。
+// currentBucket 解析目标桶：入参优先，否则回落「当前请求所属连接」的默认桶。
 func currentBucket(name string) (string, *RPCError) {
 	if strings.TrimSpace(name) == "" {
-		stateMu.Lock()
-		name = state.cfg.Bucket
-		stateMu.Unlock()
+		if s := getSession(currentConn); s != nil {
+			name = s.cfg.Bucket
+		}
 	}
 	if strings.TrimSpace(name) == "" {
 		return "", &RPCError{Code: -32000, Message: "未指定存储桶"}

@@ -381,3 +381,26 @@ test("批量下载：relPath 保留目录层级", async () => {
   assert.ok(impl.includes("state.prefix"), "应相对当前前缀计算");
   assert.ok(impl.includes("slice"), "应切掉前缀部分");
 });
+test("OB.invoke 注入本标签页 connectionId，且每标签页唯一", async () => {
+  const { win, invocations } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+
+  // 每个标签页（独立 webview / 独立加载）应有唯一的会话 ID
+  assert.ok(OB.tabSessionId && OB.tabSessionId.startsWith("tab-"), "应生成 tab- 前缀的会话 ID");
+  assert.strictEqual(OB.state.connectionId, OB.tabSessionId, "connectionId 默认应为标签页会话 ID");
+  const { win: win2 } = loadUI();
+  assert.notStrictEqual(win2.OB.tabSessionId, OB.tabSessionId, "两个标签页的会话 ID 应不同");
+
+  // OB.invoke 应把 connectionId 注入 params（后端据此路由会话，见 backend/session.go）
+  await OB.invoke("objects/list", { bucket: "bucket-a", prefix: "" });
+  const call = invocations[invocations.length - 1];
+  assert.strictEqual(call.method, "objects/list");
+  assert.strictEqual(call.params.connectionId, OB.tabSessionId, "invoke 应注入 connectionId");
+  assert.strictEqual(call.params.bucket, "bucket-a", "原有参数应保留");
+
+  // params 已显式带 connectionId 时不覆盖
+  await OB.invoke("connection/status", { connectionId: "explicit-id" });
+  const call2 = invocations[invocations.length - 1];
+  assert.strictEqual(call2.params.connectionId, "explicit-id", "显式 connectionId 不应被覆盖");
+});

@@ -244,13 +244,14 @@ func TestSetMetaPatch_EmptyMeansNoChange(t *testing.T) {
 		},
 	}
 	withMockDriver(t, objs)
+	drv := getSession(defaultConnID).driver
 
 	// 只改 Content-Type，其余应保持不变
-	err := state.driver.SetMeta("b", "p.txt", MetaPatch{ContentType: "text/markdown"})
+	err := drv.SetMeta("b", "p.txt", MetaPatch{ContentType: "text/markdown"})
 	if err != nil {
 		t.Fatalf("SetMeta 失败: %v", err)
 	}
-	m, _ := state.driver.Stat("b", "p.txt")
+	m, _ := drv.Stat("b", "p.txt")
 	if m.ContentType != "text/markdown" {
 		t.Errorf("ContentType 应被改为 text/markdown, got %q", m.ContentType)
 	}
@@ -274,14 +275,15 @@ func TestSetMetaPatch_UserMetadataReplace(t *testing.T) {
 		},
 	}
 	withMockDriver(t, objs)
+	drv := getSession(defaultConnID).driver
 
-	err := state.driver.SetMeta("b", "p.txt", MetaPatch{
+	err := drv.SetMeta("b", "p.txt", MetaPatch{
 		UserMetadata: map[string]string{"new": "2"},
 	})
 	if err != nil {
 		t.Fatalf("SetMeta 失败: %v", err)
 	}
-	m, _ := state.driver.Stat("b", "p.txt")
+	m, _ := drv.Stat("b", "p.txt")
 	if m.UserMetadata["new"] != "2" {
 		t.Errorf("新 meta 应生效, got %v", m.UserMetadata)
 	}
@@ -299,7 +301,7 @@ func TestCopyAcross_SeparatesBuckets(t *testing.T) {
 	}
 	withMockDriver(t, objs)
 
-	if err := state.driver.CopyAcross("b1", "b2", "src.txt", "dst.txt"); err != nil {
+	if err := getSession(defaultConnID).driver.CopyAcross("b1", "b2", "src.txt", "dst.txt"); err != nil {
 		t.Fatalf("跨桶复制失败: %v", err)
 	}
 	if _, ok := objs["dst.txt"]; !ok {
@@ -317,7 +319,7 @@ func TestMoveAcross_DeletesSource(t *testing.T) {
 	}
 	withMockDriver(t, objs)
 
-	if err := state.driver.MoveAcross("b1", "b2", "src.txt", "dst.txt"); err != nil {
+	if err := getSession(defaultConnID).driver.MoveAcross("b1", "b2", "src.txt", "dst.txt"); err != nil {
 		t.Fatalf("跨桶移动失败: %v", err)
 	}
 	if _, ok := objs["src.txt"]; ok {

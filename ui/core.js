@@ -41,9 +41,16 @@
   OB.COLORS = ["#22c55e", "#eab308", "#f97316", "#ef4444", "#3b82f6", "#a855f7"];
   OB.selectedColor = OB.COLORS[4];
 
+  // 标签页会话 ID：每个标签页是独立的 webview，core.js 各自加载一次，
+  // 这里生成的 ID 天然「每标签页唯一」。插件自建表单连接（无宿主连接上下文）
+  // 用它作为后端会话 key（OB.invoke 自动注入 connectionId，见下文）；
+  // 宿主托管连接由 app.js boot 用 context.connectionId 覆盖——两者必须与
+  // 后端 connection/connect 存入会话表时用的 key 一致（backend/session.go）。
+  OB.tabSessionId = "tab-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+
   // 全局 UI 状态。所有模块共享同一份对象（引用语义，改一处处处可见）。
   OB.state = {
-    connectionId: null,
+    connectionId: OB.tabSessionId,
     connected: false,
     provider: "aliyun", // aliyun | s3
     endpoint: "",    // 当前连接 Endpoint（用于「获得地址」）
@@ -216,8 +223,22 @@
   };
 
   // OB.invoke 调用宿主 sidecar 的 JSON-RPC。
+  //
+  // 每个标签页注入自己的连接标识 connectionId：Sidecar 进程按插件共享、跨标签页
+  // 复用，后端按该 ID 隔离会话（见 backend/session.go）。不注入的话，后打开的连接
+  // 会覆盖先打开的——切回旧标签页操作时会用到新连接的凭证而报错。
+  // 宿主托管连接的 connectionId 来自 context.connectionId（见 app.js boot），
+  // 自建表单连接的来自本标签页生成的会话 ID（见上方 tabSessionId）。
+  // params 若已显式带 connectionId 则以其为准，不覆盖。
   OB.invoke = function (method, params, opts) {
-    return global.dbxPlugin.invoke(method, params, Object.assign({ timeoutMs: 30000 }, opts || {}));
+    const cid = OB.state.connectionId;
+    let p = params;
+    if (cid) {
+      p = (params && typeof params === "object" && !Array.isArray(params))
+        ? Object.assign({ connectionId: cid }, params)
+        : { connectionId: cid };
+    }
+    return global.dbxPlugin.invoke(method, p, Object.assign({ timeoutMs: 30000 }, opts || {}));
   };
 
   // 批量操作上限：仅约束「批量复制地址」（一次性生成上万行大文本会拖垮 webview）。
