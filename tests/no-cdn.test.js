@@ -1,10 +1,13 @@
 // no-cdn.test.js — 守护「前端零外部请求」这条约束。
 //
-// 插件沙箱按 manifest.permissions 施加 CSP；本插件未声明 host.network，
-// 任何对外部域的 script/style/fetch 都会被拦掉。除了必然失败之外，这类引用
-// 还有供应链风险（从第三方 CDN 拉可执行 JS）。ui/fileviewer 与 ui/o3dv 是
-// 构建产物，README 记载其构建后必须 grep 校验零 CDN；这里覆盖 ui/ 下的
-// 自有源码，避免 cdnjs 之类的回退分支被重新加回来。
+// 宿主沙箱的 CSP 不放行任何外部域名：桌面端 script-src 只有 'unsafe-inline'
+// blob: 与插件自身资产源（且 default-src 'none'），开发宿主是 'self'
+// 'unsafe-inline' blob:，Web 端是 'self' 'unsafe-inline'；style-src 同样只放行
+// 内联与 blob。connect-src 默认 'none'，只有声明 host.network 才按 origin 放行。
+// 即外部 script/style 在任何宿主形态、任何权限组合下都加载不了，写了就是死代码
+//（官方文档亦明确：不要把 Vite dev server 或 CDN 的脚本地址写进发行包）。
+// ui/fileviewer 与 ui/o3dv 是构建产物，README 记载其构建后必须 grep 校验零 CDN；
+// 这里覆盖 ui/ 下的自有源码，避免 cdnjs 之类的回退分支被重新加回来。
 
 const test = require("node:test");
 const assert = require("node:assert");
@@ -61,7 +64,7 @@ test("ui/ 自有源码不引用外部 CDN", () => {
   assert.deepStrictEqual(
     offenders,
     [],
-    "发现外部 URL 引用（未声明 host.network，请求必被 CSP 拦截；且构成供应链风险）：\n  " +
+    "发现外部 URL 引用（宿主沙箱 CSP 的 script-src/style-src 不放行外部域，加载必失败）：\n  " +
       offenders.join("\n  ")
   );
 });

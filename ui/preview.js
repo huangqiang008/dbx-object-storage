@@ -52,10 +52,13 @@
 
   // Markdown / 代码高亮用的两个库：只用随包本地资产（零外联、离线可用）。
   //
-  // 不再回退 cdnjs：manifest 未声明 host.network，宿主沙箱 CSP 不放行外部域，
-  // 该回退分支必然失败，只会在控制台留一条被拦截的请求。更值得注意的是，若将来
-  // 有人因别的需求给本插件加上 host.network，这段死代码会静默变成「从 CDN 拉
-  // 可执行 JS」的供应链面——那不该是顺手打开的口子。
+  // 不回退 CDN：宿主沙箱的 CSP script-src 在任何形态下都不放行外部域名——
+  //   - 桌面端：script-src 'unsafe-inline' blob: <插件资产源>（default-src 'none'）
+  //   - 开发宿主（dbx-plugin dev）：script-src 'self' 'unsafe-inline' blob:
+  //   - Web 端：script-src 'self' 'unsafe-inline'
+  // 注意 host.network 权限只影响 connect-src（fetch/XHR），管不到 <script src>，
+  // 所以「声明权限就能让 CDN 回退生效」这条路走不通。官方文档亦明确要求：
+  // 「不要把 Vite dev server 或 CDN 的脚本地址写进发行包」。
   // 资产缺失时照旧降级纯文本、不阻塞预览（loadScriptAny 的失败路径不变）。
   // 保留数组形式：loadScriptAny / loadStyleAny 的多候选逻辑无需改动。
   OB.shared.MD_ASSETS = {
