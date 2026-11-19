@@ -15,8 +15,8 @@ import (
 // withTempDir 见 upload_test.go（同包复用，此处不再重复定义）
 
 func TestUploadStem_Stable(t *testing.T) {
-	a := uploadStem("bkt", "p/q/f.bin", 1024)
-	b := uploadStem("bkt", "p/q/f.bin", 1024)
+	a := uploadStem(defaultConnID, "bkt", "p/q/f.bin", 1024)
+	b := uploadStem(defaultConnID, "bkt", "p/q/f.bin", 1024)
 	if a != b {
 		t.Errorf("相同输入应得相同 stem: %q vs %q", a, b)
 	}
@@ -27,14 +27,15 @@ func TestUploadStem_Stable(t *testing.T) {
 
 // 任一维度变化都必须导致 stem 变化，否则会误接管别的文件的上传分片。
 func TestUploadStem_DiffersOnAnyFieldChange(t *testing.T) {
-	base := uploadStem("bkt", "key", 100)
+	base := uploadStem(defaultConnID, "bkt", "key", 100)
 	cases := []struct {
 		desc  string
 		other string
 	}{
-		{"bucket 不同", uploadStem("other", "key", 100)},
-		{"key 不同", uploadStem("bkt", "key2", 100)},
-		{"size 不同", uploadStem("bkt", "key", 101)},
+		{"连接不同", uploadStem("conn-other", "bkt", "key", 100)},
+		{"bucket 不同", uploadStem(defaultConnID, "other", "key", 100)},
+		{"key 不同", uploadStem(defaultConnID, "bkt", "key2", 100)},
+		{"size 不同", uploadStem(defaultConnID, "bkt", "key", 101)},
 	}
 	for _, c := range cases {
 		if base == c.other {
@@ -45,8 +46,8 @@ func TestUploadStem_DiffersOnAnyFieldChange(t *testing.T) {
 
 // 分隔符防碰撞：若直接用分隔符拼接，("a","b\0c") 与 ("a\0b","c") 会撞车。
 func TestUploadStem_NoDelimiterCollision(t *testing.T) {
-	x := uploadStem("a", "b\x00c", 1)
-	y := uploadStem("a\x00b", "c", 1)
+	x := uploadStem(defaultConnID, "a", "b\x00c", 1)
+	y := uploadStem(defaultConnID, "a\x00b", "c", 1)
 	if x == y {
 		t.Error("含分隔符的 key/bucket 组合不应产生相同 stem")
 	}
@@ -67,7 +68,7 @@ func TestClaimResumableUpload_ResumesExisting(t *testing.T) {
 
 		const bucket, key = "bkt", "p/f.bin"
 		const size = int64(4096)
-		stem := uploadStem(bucket, key, size)
+		stem := uploadStem(defaultConnID, bucket, key, size)
 
 		// 先跑一次 begin 产生元数据，再手工写入一半分片
 		payload := make([]byte, 2048)
@@ -77,12 +78,12 @@ func TestClaimResumableUpload_ResumesExisting(t *testing.T) {
 		if e := os.WriteFile(filepath.Join(dir, stem+".part"), payload, 0o600); e != nil {
 			t.Fatal(e)
 		}
-		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size, Mime: "application/octet-stream"})
+		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size, Mime: "application/octet-stream", ConnID: defaultConnID})
 		if e := os.WriteFile(filepath.Join(dir, stem+".meta"), raw, 0o600); e != nil {
 			t.Fatal(e)
 		}
 
-		sess := claimResumableUpload(bucket, key, size)
+		sess := claimResumableUpload(defaultConnID, bucket, key, size)
 		if sess == nil {
 			t.Fatal("应接管已有分片")
 		}
@@ -124,11 +125,11 @@ func TestClaimResumableUpload_RejectsMismatch(t *testing.T) {
 
 		const bucket, key = "bkt", "p/f.bin"
 		const size = int64(4096)
-		stem := uploadStem(bucket, key, size)
+		stem := uploadStem(defaultConnID, bucket, key, size)
 		if e := os.WriteFile(filepath.Join(dir, stem+".part"), make([]byte, 100), 0o600); e != nil {
 			t.Fatal(e)
 		}
-		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size})
+		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size, ConnID: defaultConnID})
 		if e := os.WriteFile(filepath.Join(dir, stem+".meta"), raw, 0o600); e != nil {
 			t.Fatal(e)
 		}
@@ -146,7 +147,7 @@ func TestClaimResumableUpload_RejectsMismatch(t *testing.T) {
 			{"分片为空", bucket, key, 0, true},
 		}
 		for _, c := range cases {
-			if sess := claimResumableUpload(c.b, c.k, c.s); sess != nil {
+			if sess := claimResumableUpload(defaultConnID, c.b, c.k, c.s); sess != nil {
 				sess.file.Close()
 				t.Errorf("%s 时不应接管", c.desc)
 			}
@@ -156,7 +157,7 @@ func TestClaimResumableUpload_RejectsMismatch(t *testing.T) {
 		if e := os.Remove(filepath.Join(dir, stem+".part")); e != nil {
 			t.Fatal(e)
 		}
-		if sess := claimResumableUpload(bucket, key, size); sess != nil {
+		if sess := claimResumableUpload(defaultConnID, bucket, key, size); sess != nil {
 			sess.file.Close()
 			t.Error("缺少分片文件时不应接管")
 		}
@@ -178,13 +179,13 @@ func TestClaimResumableUpload_DiscardsOversizedPart(t *testing.T) {
 
 		const bucket, key = "bkt", "f.bin"
 		const size = int64(100)
-		stem := uploadStem(bucket, key, size)
+		stem := uploadStem(defaultConnID, bucket, key, size)
 
 		// 空分片
-		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size})
+		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size, ConnID: defaultConnID})
 		os.WriteFile(filepath.Join(dir, stem+".meta"), raw, 0o600)
 		os.WriteFile(filepath.Join(dir, stem+".part"), []byte{}, 0o600)
-		if sess := claimResumableUpload(bucket, key, size); sess != nil {
+		if sess := claimResumableUpload(defaultConnID, bucket, key, size); sess != nil {
 			sess.file.Close()
 			t.Error("空分片不应被接管")
 		}
@@ -195,7 +196,7 @@ func TestClaimResumableUpload_DiscardsOversizedPart(t *testing.T) {
 		// 超长分片
 		os.WriteFile(filepath.Join(dir, stem+".meta"), raw, 0o600)
 		os.WriteFile(filepath.Join(dir, stem+".part"), make([]byte, 200), 0o600)
-		if sess := claimResumableUpload(bucket, key, size); sess != nil {
+		if sess := claimResumableUpload(defaultConnID, bucket, key, size); sess != nil {
 			sess.file.Close()
 			t.Error("超长分片不应被接管")
 		}
@@ -208,7 +209,7 @@ func TestClaimResumableUpload_DiscardsOversizedPart(t *testing.T) {
 // 无任何历史分片时返回 nil（走全新上传路径）。
 func TestClaimResumableUpload_NoHistory(t *testing.T) {
 	withTempDir(t, func(_ string) {
-		if sess := claimResumableUpload("bkt", "nobody.bin", 100); sess != nil {
+		if sess := claimResumableUpload(defaultConnID, "bkt", "nobody.bin", 100); sess != nil {
 			sess.file.Close()
 			t.Error("无历史分片时应返回 nil")
 		}
@@ -228,11 +229,11 @@ func TestClaimResumableUpload_CorruptMeta(t *testing.T) {
 			uploadsMu.Unlock()
 		})
 
-		stem := uploadStem("bkt", "f.bin", 100)
+		stem := uploadStem(defaultConnID, "bkt", "f.bin", 100)
 		os.WriteFile(filepath.Join(dir, stem+".part"), make([]byte, 10), 0o600)
 		os.WriteFile(filepath.Join(dir, stem+".meta"), []byte(`{"bucket":"bkt","key`), 0o600)
 
-		if sess := claimResumableUpload("bkt", "f.bin", 100); sess != nil {
+		if sess := claimResumableUpload(defaultConnID, "bkt", "f.bin", 100); sess != nil {
 			sess.file.Close()
 			t.Error("元数据损坏时不应接管")
 		}
@@ -262,6 +263,64 @@ func TestRemoveUploadFiles_CleansPartAndMeta(t *testing.T) {
 		}
 		if _, e := os.Stat(meta); !os.IsNotExist(e) {
 			t.Error(".meta 应被删除")
+		}
+	})
+}
+
+// TestClaimResumableUpload_RejectsOtherConnection 跨连接不得接管分片。
+//
+// 场景：同一台机器上两个连接（可能是两个不同的存储服务、不同凭证）上传
+// 同名同大小的对象——「把同一份文件镜像到两个云」是常见操作，size 必然相同。
+// 若接管，A 连接的文件内容会被传进 B 连接的存储，属于跨连接数据污染。
+func TestClaimResumableUpload_RejectsOtherConnection(t *testing.T) {
+	uploadE2E(t, func() {
+		const bucket, key = "data", "report.bin"
+		const size = int64(4096)
+
+		// 手工造出「连接 A 遗留」的分片与元数据
+		stemA := uploadStem("conn-A", bucket, key, size)
+		dir := os.TempDir()
+		if e := os.WriteFile(filepath.Join(dir, stemA+".part"), make([]byte, 1024), 0o600); e != nil {
+			t.Fatal(e)
+		}
+		raw, _ := json.Marshal(uploadMeta{
+			Bucket: bucket, Key: key, Size: size, ConnID: "conn-A",
+		})
+		if e := os.WriteFile(filepath.Join(dir, stemA+".meta"), raw, 0o600); e != nil {
+			t.Fatal(e)
+		}
+
+		// 连接 B 尝试接管：stem 不同 → 找不到，返回 nil（不会误接管）
+		if sess := claimResumableUpload("conn-B", bucket, key, size); sess != nil {
+			sess.file.Close()
+			t.Error("连接 B 不应接管连接 A 的分片")
+		}
+		// 连接 A 自己仍可接管
+		sess := claimResumableUpload("conn-A", bucket, key, size)
+		if sess == nil {
+			t.Fatal("连接 A 应能接管自己的分片")
+		}
+		sess.file.Close()
+	})
+}
+
+// TestClaimResumableUpload_RejectsLegacyMetaWithoutConnID 旧版本写的 .meta 没有
+// connId 字段，无法确认归属，一律不接管——宁可全量重传，也不能把内容传到
+// 可能错误的存储服务上。
+func TestClaimResumableUpload_RejectsLegacyMetaWithoutConnID(t *testing.T) {
+	uploadE2E(t, func() {
+		const bucket, key = "bkt", "f.bin"
+		const size = int64(100)
+		stem := uploadStem(defaultConnID, bucket, key, size)
+		dir := os.TempDir()
+		os.WriteFile(filepath.Join(dir, stem+".part"), make([]byte, 50), 0o600)
+		// ConnID 留空 = 旧版本产物
+		raw, _ := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Size: size})
+		os.WriteFile(filepath.Join(dir, stem+".meta"), raw, 0o600)
+
+		if sess := claimResumableUpload(defaultConnID, bucket, key, size); sess != nil {
+			sess.file.Close()
+			t.Error("无 connId 的旧分片不应被接管")
 		}
 	})
 }

@@ -24,7 +24,12 @@ import (
 // 好处：单条 RPC 负载小不超时、内存恒定、可中途取消；对驱动零差异。
 
 type uploadSession struct {
-	id       string
+	id string
+	// connID 是本会话归属的连接标识。用途有二：
+	//  1. 归属校验——chunk/complete/abort/release 只接受同一连接的请求，
+	//     防止一个连接操作另一个连接的上传会话；
+	//  2. 参与 .part/.meta 文件名派生（见 uploadStem），把不同连接的分片隔开。
+	connID   string
 	file     *os.File
 	tmpPath  string
 	metaPath string
@@ -50,6 +55,10 @@ type uploadMeta struct {
 	// StorageClass 归一化存储类别（2.5）。跨进程续传时沿用，
 	// 避免续传后存储类别与首次上传不一致。
 	StorageClass string `json:"storageClass,omitempty"`
+	// ConnID 分片归属的连接标识。接管前必须与本次请求一致，
+	// 否则同名同大小的对象会被别的连接误接管（见 claimResumableUpload）。
+	// 旧版本写的 .meta 没有此字段（空串），一律不接管。
+	ConnID string `json:"connId,omitempty"`
 }
 
 var (
@@ -176,7 +185,7 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 	}
 	// 断点续传：先找这个对象是否已有历史分片（sidecar 上次崩溃/被杀会留下）。
 	// 命中则接管该文件继续追加，避免整个文件重传。
-	if sess := claimResumableUpload(bucket, p.Path, p.Size); sess != nil {
+	if sess := claimResumableUpload(currentConn, bucket, p.Path, p.Size); sess != nil {
 		// 续传时以本次请求的存储类别为准：历史分片可能来自另一次上传。
 		sess.storageClass = storageClass
 		return map[string]interface{}{
@@ -186,7 +195,17 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 		}, nil
 	}
 
-	tmp, err := os.CreateTemp("", uploadTempPattern)
+	// 分片文件必须建在「稳定可推导」的路径上（uploadStem 由连接+桶+key+size 派生），
+	// 否则 sidecar 重启后 claimResumableUpload 找不到它，断点续传静默失效。
+	// 不用 os.CreateTemp：随机文件名无法跨进程找回。
+	stem := uploadStem(currentConn, bucket, p.Path, p.Size)
+	partPath := filepath.Join(os.TempDir(), stem+".part")
+	// 同一对象已有在途上传会话时拒绝：两个会话同时 O_APPEND 同一文件会互相穿插，
+	// 传上去的是损坏内容。并发上传同名对象本就不是合法用法。
+	if rerr := ensureNoActiveUploadOn(partPath); rerr != nil {
+		return nil, rerr
+	}
+	tmp, err := os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: "创建临时文件失败: " + err.Error()}
 	}
@@ -197,7 +216,7 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 		return nil, rerr
 	}
 	sess := &uploadSession{
-		id: id, file: tmp, tmpPath: tmp.Name(),
+		id: id, connID: currentConn, file: tmp, tmpPath: tmp.Name(),
 		bucket: bucket, key: p.Path, mime: p.Mime, size: p.Size,
 		storageClass: storageClass,
 	}
@@ -207,25 +226,39 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 		os.Remove(tmp.Name())
 		return nil, e
 	}
-	// 元数据落盘，供下次 sidecar 启动后按 (bucket,key,size) 找回此分片
+	// 元数据落盘，供下次 sidecar 启动后按 (connID,bucket,key,size) 找回此分片
 	persistUploadMeta(sess)
 	return map[string]interface{}{"uploadId": id, "offset": int64(0), "resumed": false}, nil
 }
 
+// ensureNoActiveUploadOn 检查是否已有在途会话正在写这个分片文件。
+func ensureNoActiveUploadOn(partPath string) *RPCError {
+	uploadsMu.Lock()
+	defer uploadsMu.Unlock()
+	for _, s := range uploads {
+		if s.tmpPath == partPath {
+			return &RPCError{Code: -32000, Message: "该对象已有进行中的上传，请等待其完成或取消"}
+		}
+	}
+	return nil
+}
+
 // claimResumableUpload 尝试接管上次未完成的分片文件，实现跨进程断点续传。
 //
-// 前提是分片文件名可由 (bucket, key, size) 稳定推导：否则 sidecar 一重启，
-// 内存里的 uploads map 与随机文件名都无从对应，续传无从谈起。
-// 故用 sha256(bucket+"\x00"+key+"\x00"+size) 前 12 字节作为文件名，
-// 元数据另存同名 .meta（key 含 "/"，无法从文件名反推）。
+// 前提是分片文件名可由 (connID, bucket, key, size) 稳定推导：否则 sidecar 一重启，
+// 内存里的 uploads map 与文件名都无从对应，续传无从谈起。
+// 故用 sha256 前 12 字节作为文件名，元数据另存同名 .meta（key 含 "/"，无法从文件名反推）。
 //
-// 安全性：.meta 与 .part 必须同时存在且三者（bucket/key/size）完全一致才接管，
+// 安全性：.meta 与 .part 必须同时存在，且四者（connID/bucket/key/size）完全一致才接管。
+// connID 参与派生与校验是必要的：两个连接（不同存储服务、不同凭证）上传同名同大小
+// 的对象很常见（例如把同一份文件镜像到两个云），若不隔离，A 连接遗留的分片会被
+// B 连接接管，把 A 的文件内容传进 B 的存储。
 // 分片为空或超过声明大小一律丢弃重来——避免把 A 文件的内容接到 B 文件上。
-func claimResumableUpload(bucket, key string, size int64) *uploadSession {
+func claimResumableUpload(connID, bucket, key string, size int64) *uploadSession {
 	if size <= 0 {
 		return nil // 不知道总大小，无法安全续传
 	}
-	stem := uploadStem(bucket, key, size)
+	stem := uploadStem(connID, bucket, key, size)
 	partPath := filepath.Join(os.TempDir(), stem+".part")
 	metaPath := filepath.Join(os.TempDir(), stem+".meta")
 
@@ -237,8 +270,10 @@ func claimResumableUpload(bucket, key string, size int64) *uploadSession {
 	if json.Unmarshal(raw, &meta) != nil {
 		return nil
 	}
-	if meta.Bucket != bucket || meta.Key != key || meta.Size != size {
-		return nil // 元数据与本次请求不符（同名碰撞或陈旧状态）
+	// connID 为空说明是旧版本（未记录归属）留下的分片，无法确认属于哪个连接，
+	// 宁可不接管也不能把内容传到可能错误的存储服务上。
+	if meta.ConnID != connID || meta.Bucket != bucket || meta.Key != key || meta.Size != size {
+		return nil // 元数据与本次请求不符（跨连接 / 同名碰撞 / 陈旧状态）
 	}
 	info, err := os.Stat(partPath)
 	if err != nil {
@@ -248,6 +283,10 @@ func claimResumableUpload(bucket, key string, size int64) *uploadSession {
 		// 空分片无续传价值；超长说明状态错乱，两种都清掉重来
 		os.Remove(partPath)
 		os.Remove(metaPath)
+		return nil
+	}
+	// 已有在途会话在写这个分片（同连接重复 begin）时不接管
+	if rerr := ensureNoActiveUploadOn(partPath); rerr != nil {
 		return nil
 	}
 
@@ -261,7 +300,7 @@ func claimResumableUpload(bucket, key string, size int64) *uploadSession {
 		return nil
 	}
 	sess := &uploadSession{
-		id: id, file: f, tmpPath: partPath, metaPath: metaPath,
+		id: id, connID: connID, file: f, tmpPath: partPath, metaPath: metaPath,
 		bucket: bucket, key: key, mime: meta.Mime, size: size,
 		written: info.Size(), resumable: true,
 		storageClass: meta.StorageClass,
@@ -274,12 +313,12 @@ func claimResumableUpload(bucket, key string, size int64) *uploadSession {
 	return sess
 }
 
-// uploadStem 由 bucket+key+size 派生稳定的临时文件名（不含扩展名）。
+// uploadStem 由 connID+bucket+key+size 派生稳定的临时文件名（不含扩展名）。
 //
-// 用「长度前缀」而非分隔符拼接：分隔符方案在 key 自身含分隔符时会歧义
+// 用「长度前缀」而非分隔符拼接：分隔符方案在字段自身含分隔符时会歧义
 // （("a","b\x00c") 与 ("a\x00b","c") 会得到同样的字节流，进而撞上同一个 stem），
 // 而对象 key 是用户可控的，这种歧义可能导致误接管别的文件的上传分片。
-func uploadStem(bucket, key string, size int64) string {
+func uploadStem(connID, bucket, key string, size int64) string {
 	h := sha256.New()
 	var lenBuf [8]byte
 	put := func(s string) {
@@ -287,6 +326,7 @@ func uploadStem(bucket, key string, size int64) string {
 		h.Write(lenBuf[:])
 		h.Write([]byte(s))
 	}
+	put(connID)
 	put(bucket)
 	put(key)
 	binary.BigEndian.PutUint64(lenBuf[:], uint64(size))
@@ -303,7 +343,7 @@ func persistUploadMeta(sess *uploadSession) {
 	sess.metaPath = strings.TrimSuffix(sess.tmpPath, ".part") + ".meta"
 	raw, err := json.Marshal(uploadMeta{
 		Bucket: sess.bucket, Key: sess.key, Size: sess.size, Mime: sess.mime,
-		StorageClass: sess.storageClass,
+		StorageClass: sess.storageClass, ConnID: sess.connID,
 	})
 	if err != nil {
 		return
@@ -321,6 +361,22 @@ func removeUploadFiles(sess *uploadSession) {
 	os.Remove(sess.tmpPath)
 	os.Remove(sess.metaPath)
 	os.Remove(strings.TrimSuffix(sess.tmpPath, ".part") + ".meta")
+}
+
+// takeUploadSession 按 uploadId 取会话并从内存表摘除，同时校验归属连接。
+// 归属不符时按「不存在」处理：不泄露别的连接的会话信息，也不让调用方误操作它。
+func takeUploadSession(uploadID string) (*uploadSession, bool) {
+	uploadsMu.Lock()
+	defer uploadsMu.Unlock()
+	sess, ok := uploads[uploadID]
+	if !ok {
+		return nil, false
+	}
+	if sess.connID != "" && sess.connID != currentConn {
+		return nil, false
+	}
+	delete(uploads, uploadID)
+	return sess, true
 }
 
 type UploadChunkParams struct {
@@ -341,7 +397,7 @@ func handleUploadChunk(params json.RawMessage) (interface{}, *RPCError) {
 	uploadsMu.Lock()
 	defer uploadsMu.Unlock()
 	sess, ok := uploads[p.UploadID]
-	if !ok {
+	if !ok || (sess.connID != "" && sess.connID != currentConn) {
 		return nil, &RPCError{Code: -32000, Message: "上传会话不存在或已结束"}
 	}
 	if p.Offset != sess.written {
@@ -362,20 +418,20 @@ func handleUploadComplete(params json.RawMessage) (interface{}, *RPCError) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &RPCError{Code: -32602, Message: "invalid params"}
 	}
-	uploadsMu.Lock()
-	sess, ok := uploads[p.UploadID]
-	delete(uploads, p.UploadID)
-	uploadsMu.Unlock()
+	sess, ok := takeUploadSession(p.UploadID)
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "上传会话不存在或已结束"}
 	}
-	// 必须在 PutFromFile 之后再删分片：驱动要从该文件读取内容。
-	// 同时清掉 .meta，否则会留下没有分片的孤儿元数据。
-	defer removeUploadFiles(sess)
+	// 先确认驱动可用再摘除分片：若在未连接时就清理，用户已传的分片全丢、
+	// 续传白费（连接恢复后只能从头重传）。取不到驱动时会话已摘除，
+	// 但 .part/.meta 保留在磁盘上，下次 begin 仍可接管。
 	d, rerr := getDriver()
 	if rerr != nil {
 		return nil, rerr
 	}
+	// 必须在 PutFromFile 之后再删分片：驱动要从该文件读取内容。
+	// 同时清掉 .meta，否则会留下没有分片的孤儿元数据。
+	defer removeUploadFiles(sess)
 	if err := d.PutFromFileWithClass(sess.bucket, sess.key, sess.tmpPath, sess.mime, sess.storageClass); err != nil {
 		return nil, &RPCError{Code: -32000, Message: "上传失败: " + err.Error()}
 	}
@@ -389,11 +445,7 @@ func handleUploadAbort(params json.RawMessage) (interface{}, *RPCError) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &RPCError{Code: -32602, Message: "invalid params"}
 	}
-	uploadsMu.Lock()
-	sess, ok := uploads[p.UploadID]
-	delete(uploads, p.UploadID)
-	uploadsMu.Unlock()
-	if ok {
+	if sess, ok := takeUploadSession(p.UploadID); ok {
 		// 用户主动取消：连同元数据一起清掉，不给后续续传留垃圾
 		removeUploadFiles(sess)
 	}
@@ -418,11 +470,7 @@ func handleUploadRelease(params json.RawMessage) (interface{}, *RPCError) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &RPCError{Code: -32602, Message: "invalid params"}
 	}
-	uploadsMu.Lock()
-	sess, ok := uploads[p.UploadID]
-	delete(uploads, p.UploadID)
-	uploadsMu.Unlock()
-	if ok && sess.file != nil {
+	if sess, ok := takeUploadSession(p.UploadID); ok && sess.file != nil {
 		// 只关句柄，不删磁盘文件
 		sess.file.Close()
 	}
