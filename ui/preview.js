@@ -50,12 +50,18 @@
     return null;
   };
 
-  // Markdown / 代码高亮用的两个库：随包本地资产优先（零外联、离线可用），
-  // 本地资产缺失时才回退 cdnjs（旧包或资产被剪枝的场景）。失败一律降级纯文本，不阻塞预览。
+  // Markdown / 代码高亮用的两个库：只用随包本地资产（零外联、离线可用）。
+  //
+  // 不再回退 cdnjs：manifest 未声明 host.network，宿主沙箱 CSP 不放行外部域，
+  // 该回退分支必然失败，只会在控制台留一条被拦截的请求。更值得注意的是，若将来
+  // 有人因别的需求给本插件加上 host.network，这段死代码会静默变成「从 CDN 拉
+  // 可执行 JS」的供应链面——那不该是顺手打开的口子。
+  // 资产缺失时照旧降级纯文本、不阻塞预览（loadScriptAny 的失败路径不变）。
+  // 保留数组形式：loadScriptAny / loadStyleAny 的多候选逻辑无需改动。
   OB.shared.MD_ASSETS = {
-    marked: ["vendor/marked.min.js", "https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"],
-    hljs: ["vendor/highlight.min.js", "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"],
-    hljsCss: ["vendor/highlight-github.min.css", "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"],
+    marked: ["vendor/marked.min.js"],
+    hljs: ["vendor/highlight.min.js"],
+    hljsCss: ["vendor/highlight-github.min.css"],
   };
 
   const scriptCache = {};
