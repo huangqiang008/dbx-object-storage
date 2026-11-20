@@ -49,6 +49,7 @@
     }
     $("dlName").textContent = name;
     $("dlName").title = name;
+    dlResetPhase(); // 清掉上一轮可能残留的「正在上传到云端」不确定态
     $("dlFill").style.width = "0%";
     $("dlPct").textContent = "0%";
     $("dlBytes").textContent = "";
@@ -72,6 +73,42 @@
     }
     OB.shared.dl.lastWritten = written; OB.shared.dl.lastT = now;
   }
+  // dlUploadingPhase 把进度卡切到「正在上传到云端」的不确定态。
+  //
+  // 上传是两跳：先把分片写进 sidecar 的本地临时文件（快，dlProgress 量的是这个），
+  // 再由 upload/complete 把临时文件真正传到云端（慢，可达数分钟，且当前后端
+  // 不回传进度）。若在第二跳仍显示"100%"，用户会以为已经完成或界面卡死。
+  //
+  // 这里改为：填充条走不确定态动画、百分比文案换成阶段说明、清空字节与速率
+  //（它们描述的是第一跳，已无意义）。单文件上传时进度条从 100% 退到不确定态
+  // 是**更诚实**的表达：字节已交给 sidecar ≠ 已上传完成。
+  OB.dlUploadingPhase = function dlUploadingPhase(name) {
+    if (OB.shared.dl.mode !== "upload") return; // 仅上传有此两阶段
+    const fill = $("dlFill");
+    if (fill) {
+      fill.style.width = "";
+      fill.classList.add("indeterminate");
+    }
+    const pct = $("dlPct");
+    if (pct) pct.textContent = I18N.t("upload.phaseUploading");
+    const bytes = $("dlBytes");
+    if (bytes) bytes.textContent = name || "";
+    const speed = $("dlSpeed");
+    if (speed) speed.textContent = "";
+    // 清掉第一跳的计时基准：否则下次 dlProgress 会拿旧时间算出离谱速率
+    OB.shared.dl.lastT = 0;
+    OB.shared.dl.lastWritten = 0;
+  };
+
+  // dlResetPhase 清除不确定态，供同一张进度卡复用于下一个文件时调用。
+  function dlResetPhase() {
+    const fill = $("dlFill");
+    if (fill) {
+      fill.classList.remove("indeterminate");
+      fill.style.width = "0%";
+    }
+  }
+
   // 按条数（而非字节）推进度：批量下载 / 批量删除的进度单位是「项」
   OB.dlProgressItems = function dlProgressItems(done, total) {
     const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
@@ -89,6 +126,9 @@
   OB.finishDlCard = function finishDlCard(text, keepFill) {
     $("dlMsg").textContent = text || I18N.t("dl.saved");
     $("dlMsg").className = "dl-msg ok";
+    // 必须先清掉不确定态：它带 transform 动画，若残留会让"100%"的填充条
+    // 继续来回滑动，看起来像没传完。
+    dlResetPhase();
     // keepFill：取消场景保留当前真实进度，不强行拉到 100%
     if (!keepFill) {
       $("dlFill").style.width = "100%";
@@ -104,6 +144,7 @@
   OB.failDlCard = function failDlCard(err) {
     $("dlMsg").textContent = err;
     $("dlMsg").className = "dl-msg err";
+    dlResetPhase(); // 同上：失败收尾也要停掉不确定态动画
     $("dlCancel").classList.add("hidden");
     $("dlOk").classList.remove("hidden");
   };
@@ -428,23 +469,48 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   // 再多容易触发服务端限流（429）。
   const UP_CONC = 3;
 
+  // pinUploadContext 在批次开始时钉住上传目标上下文。
+  //
+  // 为什么必须钉住：进度卡只是右下角浮动卡片（styles.css .dl-card，position:fixed），
+  // 不是遮罩，上传期间用户完全可以点面包屑换目录、甚至切到别的桶。若在每次
+  // upload/begin 时才读 OB.state，跑到一半用户一导航，**后续文件就会被传到他
+  // 新点开的目录/桶里去**——数据写错位置且无提示。整批共用一份快照即可杜绝。
+  function pinUploadContext() {
+    return {
+      bucket: OB.state.bucket,
+      prefix: OB.state.prefix,
+      storageClass: OB.state.uploadStorageClass,
+    };
+  }
+
   // uploadOneFile 上传单个文件，返回 {ok, key, error}
   //
-  // onProgress：字节进度回调。并发上传时传 null——多个文件同时写同一张
-  // 进度卡会互相覆盖，此时进度改由外层按「项」推进（dlProgressItems）。
-  async function uploadOneFile(f, key, onProgress) {
+  // ctx：由 pinUploadContext 钉住的目标上下文（bucket/prefix/storageClass），
+  //      整批共用，不随用户中途导航而变。
+  // onProgress：字节进度回调，**传 null 表示完全不做字节级上报**。
+  //   单文件上传传 dlProgress（能看到实时字节数）；多文件并发必须传 null——
+  //   3 个 worker 同时往同一张进度卡写字节数会互相覆盖成乱跳的数字，此时
+  //   进度由外层按「项」推进（dlProgressItems），它只在单个文件**真正完成**
+  //   （含上云）后才 +1，因此不会出现"字节写完就显示 100%"的假进度。
+  // onUploading：进入「上云」阶段（分片已全部落盘、开始 upload/complete）时回调一次。
+  //   单文件传它把进度卡切到不确定态；多文件传它累加在途上云计数。
+  async function uploadOneFile(f, key, ctx, onProgress, onUploading) {
     let uploadId = null;
-    const report = onProgress || ((w, t) => dlProgress(w, t));
+    // 不做默认回退：null 就是"不上报"。早先这里写成
+    //   const report = onProgress || ((w, t) => dlProgress(w, t));
+    // 导致传 null 反而回退到字节级上报，与注释意图相反，并发下进度卡被抢写。
+    const report = onProgress || null;
+    const emit = (w, t) => { if (report) report(w, t); };
     try {
       const beg = await OB.invoke("upload/begin", {
-        bucket: OB.state.bucket, path: key, size: f.size, mime: f.type || "",
-        storageClass: OB.state.uploadStorageClass,
+        bucket: ctx.bucket, path: key, size: f.size, mime: f.type || "",
+        storageClass: ctx.storageClass,
       });
       uploadId = beg.uploadId;
       // 后端返回已写入字节数：从断点继续
       let offset = (typeof beg.offset === "number" && beg.offset > 0) ? beg.offset : 0;
       if (beg.resumed && offset > 0) {
-        report(offset, f.size);
+        emit(offset, f.size);
       }
 
       while (offset < f.size) {
@@ -455,8 +521,13 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
         const buf = await f.slice(offset, offset + UP_CHUNK).arrayBuffer();
         const r = await OB.invoke("upload/chunk", { uploadId, offset, content: base64FromArrayBuffer(buf) });
         offset = (r && typeof r.written === "number") ? r.written : offset + buf.byteLength;
-        report(offset, f.size);
+        emit(offset, f.size);
       }
+      // 分片已全部落到 sidecar 本地临时文件，接下来才是真正的上云阶段。
+      // 这一步可能持续数分钟（200MB 在 500KB/s 上行下约 6.7 分钟），且后端
+      // 目前不回传进度，所以通知外层切换显示，避免停在"100%"让人误以为卡死。
+      // 真实字节进度需要后端推送事件，见 issue #11 第二批。
+      if (onUploading) onUploading(f.name);
       await OB.invoke("upload/complete", { uploadId }, { timeoutMs: 600000 });
       uploadId = null; // 已完成，后续失败不应再 abort（分片已被后端清理）
       return { ok: true, key };
@@ -480,11 +551,14 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
 
   // uploadTargetKey 计算对象 key。
   // 目录上传（webkitRelativePath 含 "/"）按相对路径保留层级，否则用纯文件名。
-  function uploadTargetKey(f) {
+  // prefix 取自钉住的 ctx 而非实时 OB.state：多文件上传期间用户可能已导航到
+  // 别处，用实时值会把后续文件传到新目录（见 pinUploadContext）。
+  function uploadTargetKey(f, ctx) {
     const rel = f.webkitRelativePath || "";
     if (rel && rel.indexOf("/") >= 0) {
-      return OB.state.prefix + rel; // 形如 "a/b/c.txt"，已含目录层级
-    }    return OB.state.prefix + f.name;
+      return ctx.prefix + rel; // 形如 "a/b/c.txt"，已含目录层级
+    }
+    return ctx.prefix + f.name;
   }
 
   // runUpload 上传给定文件列表，完成后汇总结果。
@@ -499,16 +573,18 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     if (!files.length || !OB.state.connected) return;
     if (!OB.state.bucket) { OB.setStatus(I18N.t("upload.enterBucket"), true); return; }
 
+    // 整批共用一份钉住的上下文：期间用户导航不会改变文件去向。
+    const ctx = pinUploadContext();
     const done = [];
     const failed = [];
     let cancelled = false;
 
     if (files.length === 1) {
-      // ---------- 单文件：保持字节级进度 ----------
+      // ---------- 单文件：字节级进度，上云阶段切不确定态 ----------
       const f = files[0];
-      const key = uploadTargetKey(f);
+      const key = uploadTargetKey(f, ctx);
       OB.openDlCard(f.name, "upload");
-      const res = await uploadOneFile(f, key, null);
+      const res = await uploadOneFile(f, key, ctx, dlProgress, (name) => OB.dlUploadingPhase(name));
       if (OB.shared.dl.cancelled) {
         cancelled = true;
       } else if (res.ok) {
@@ -518,30 +594,59 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       }
     } else {
       // ---------- 多文件：并发上传，按项推进进度 ----------
+      //
+      // 进度单位是「项」，且只在单个文件**完整走完两跳**（含上云）后才 +1，
+      // 所以不会出现"字节写完就显示 100%"的假进度。
+      //
+      // 上云阶段不再逐文件切不确定态（3 个 worker 会互相覆盖进度卡），
+      // 改为统计"已进入上云阶段的文件数"并在文案里如实说明：
+      // 已完成 N/M，另有 K 个正在上传到云端。
       OB.openDlCard(I18N.t("upload.progress", { n: 0, m: files.length }), "upload");
       let next = 0;
       let finished = 0;
+      let uploading = 0; // 已写完分片、正在上云的文件数
+
+      const renderSummary = () => {
+        const msg = $("dlMsg");
+        if (msg) {
+          msg.textContent = uploading > 0
+            ? I18N.t("upload.cloudPhase", { k: uploading })
+            : "";
+        }
+      };
       const worker = async () => {
         for (;;) {
           if (OB.shared.dl.cancelled) { cancelled = true; return; }
           const i = next++;
           if (i >= files.length) return;
           const f = files[i];
-          const key = uploadTargetKey(f);
+          const key = uploadTargetKey(f, ctx);
           // 当前项显示文件名（并发下多个文件交替，显示的是最近开始的那个）
           $("dlName").textContent = f.name;
           $("dlName").title = f.name;
-          const res = await uploadOneFile(f, key, null); // 不传 onProgress：进度按项算
+          // onProgress 传 null：并发下不做字节级上报，避免抢写同一张卡。
+          // onUploading 在进入上云阶段时被调用一次，用于统计在途上云文件数。
+          let inCloudPhase = false;
+          const res = await uploadOneFile(f, key, ctx, null, () => {
+            inCloudPhase = true;
+            uploading++;
+            renderSummary();
+          });
+          // 只有真正进入过上云阶段的文件才需要递减；
+          // 在分片阶段就失败/取消的文件从未计数，减了会变负。
+          if (inCloudPhase) uploading = Math.max(0, uploading - 1);
           if (res.ok) done.push(res.key);
           else failed.push({ f, key: res.key, error: res.error });
           finished++;
           OB.dlProgressItems(finished, files.length);
+          renderSummary();
         }
       };
       await Promise.all(
         Array.from({ length: Math.min(UP_CONC, files.length) }, worker)
       );
       $("dlName").textContent = ""; // 清掉最后一个文件名，结束时卡片只留汇总
+      uploading = 0;
     }
 
     if (cancelled) {
@@ -567,16 +672,29 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       OB.setStatus(text);
     }
     // 记入任务中心（B1）：上传只记录（File 句柄不可持久化，重试靠会话内 dlRetry 按钮）
+    // bucket 取钉住的 ctx：文件实际传到了那里，与用户此刻在哪无关。
     OB.recordTask({
       type: "upload",
-      bucket: OB.state.bucket,
+      bucket: ctx.bucket,
       keys: done.concat(failed.map((x) => x.key)),
       ok: done.length,
       failed: failed.map((x) => ({ key: x.key, error: x.error })),
       cancelled,
     });
-    OB.resetPaging();
-    OB.loadPage("");
+    // 仅当用户仍停留在「上传目标目录」时才刷新列表。
+    //
+    // 上传动辄数分钟，期间用户很可能已导航到别处；此时刷新会把他正在看的
+    // 视图整份重置（resetPaging 清空 items），既无必要也很突兀。
+    // 反之若他还在原地，刷新才能看到刚传上去的文件。
+    // 注意 loadPage("") 的参数是分页游标而非 prefix，它内部读 OB.state.prefix，
+    // 所以这里必须先确认 state 仍等于 ctx 才能安全调用。
+    const stillHere = !cancelled
+      && OB.state.bucket === ctx.bucket
+      && OB.state.prefix === ctx.prefix;
+    if (stillHere) {
+      OB.resetPaging();
+      OB.loadPage("");
+    }
   }
 
   OB.els.fileInput.onchange = async () => {

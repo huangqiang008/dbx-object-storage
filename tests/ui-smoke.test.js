@@ -128,6 +128,10 @@ function loadUI() {
 
   // 关键：模拟宿主沙箱的 opaque origin 行为
   const invocations = [];
+  // 上传相关状态：供「钉住上下文」测试断言文件实际去向
+  let uploadSeq = 0;
+  const uploadState = {};   // uploadId → { bucket, key, written, size }
+  const uploadLog = [];     // 按时间顺序记录 begin/chunk/complete/abort 调用
   const win = {
     document: doc,
     // opaque origin 下 clipboard API 通常不可用 → 走宿主桥
@@ -167,6 +171,11 @@ function loadUI() {
   sandbox.console = console;
   sandbox.Blob = class { constructor(a) { this.parts = a; } };
   sandbox.URL = { createObjectURL: () => "blob:mock", revokeObjectURL: () => {} };
+  // btoa/atob：真实宿主（浏览器）自带，vm 沙箱没有。utils.js 的
+  // base64FromArrayBuffer 依赖 btoa——缺了它上传分片会抛
+  // "btoa is not defined"，整条上传链路在第一个 chunk 就断掉。
+  sandbox.btoa = (s) => Buffer.from(String(s), "binary").toString("base64");
+  sandbox.atob = (b) => Buffer.from(String(b), "base64").toString("binary");
   const env = { loadError: null };
   const ctx = vm.createContext(sandbox);
   // script 标签里的顶层 this === window
@@ -194,6 +203,38 @@ function loadUI() {
         return { size: "100", mime: "text/plain", modified: "2026-01-01T00:00:00Z", etag: "e1", contentType: "text/plain" };
       case "objects/get_tags":
         return { tags: {} };
+      // ---------- 上传（供「钉住上下文」等上传流程测试驱动） ----------
+      // 每个 begin 发一个递增的 uploadId；chunk 按收到的 content 长度累计 written；
+      // complete 记录该 uploadId 对应的 (bucket,key)。所有调用都留痕在 uploadLog，
+      // 测试据此断言「中途改 OB.state 不会改变文件去向」。
+      case "upload/begin": {
+        const uploadId = "up-" + (++uploadSeq);
+        uploadState[uploadId] = { bucket: params.bucket, key: params.path, written: 0, size: params.size };
+        uploadLog.push({ method, bucket: params.bucket, path: params.path, uploadId });
+        return { uploadId, offset: 0, resumed: false };
+      }
+      case "upload/chunk": {
+        const st = uploadState[params.uploadId];
+        if (st) {
+          // content 是 base64，长度 *3/4 约为原始字节数；测试只关心单调递增
+          const b64 = String(params.content || "");
+          st.written = params.offset + Math.max(1, Math.floor((b64.length * 3) / 4));
+        }
+        uploadLog.push({ method, uploadId: params.uploadId, offset: params.offset });
+        return { written: st ? st.written : params.offset };
+      }
+      case "upload/complete": {
+        const st = uploadState[params.uploadId];
+        uploadLog.push({ method, uploadId: params.uploadId, bucket: st && st.bucket, key: st && st.key });
+        return { ok: true, size: st ? st.written : 0 };
+      }
+      case "upload/abort":
+      case "upload/release":
+        uploadLog.push({ method, uploadId: params.uploadId });
+        return { ok: true };
+      case "tasks/append":
+      case "tasks/list":
+        return method === "tasks/list" ? { tasks: [] } : { ok: true };
       default:
         return { ok: true };
     }
@@ -222,7 +263,7 @@ function loadUI() {
     }
   }
   // 沙箱里的 window 就是 sandbox 本身（脚本通过 window.OB 通信）
-  return { win: sandbox, doc, invocations, registry, scripts, loadError: env.loadError };
+  return { win: sandbox, doc, invocations, registry, scripts, uploadLog, uploadState, loadError: env.loadError };
 }
 
 // loadUIDiagnose 逐个脚本加载，报告第一个失败的位置（排查加载期错误用）。
@@ -403,4 +444,128 @@ test("OB.invoke 注入本标签页 connectionId，且每标签页唯一", async 
   await OB.invoke("connection/status", { connectionId: "explicit-id" });
   const call2 = invocations[invocations.length - 1];
   assert.strictEqual(call2.params.connectionId, "explicit-id", "显式 connectionId 不应被覆盖");
+});
+
+// ---------- 上传：上下文钉住与进度两阶段（issue #11 第一批） ----------
+
+// makeFile 造一个最小 File 替身：size 字节，slice().arrayBuffer() 可读。
+// onRead 钩子在每次读取分片时触发，用于模拟「上传途中用户导航到别处」。
+function makeFile(name, size, opts) {
+  const o = opts || {};
+  return {
+    name,
+    size,
+    type: "text/plain",
+    webkitRelativePath: o.rel || "",
+    slice(start, end) {
+      const self = this;
+      return { arrayBuffer: async () => {
+        if (o.onRead) o.onRead(self);
+        return new Uint8Array(Math.max(0, Math.min(end, size) - start)).buffer;
+      } };
+    },
+  };
+}
+
+test("多文件上传：中途导航不会把后续文件传到新目录/新桶", async () => {
+  const { win, uploadLog, invocations } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+
+  // 上传起点：bucket-a 下的 dir/ 目录
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "dir/";
+
+  // 文件数必须多于并发路数（UP_CONC=3）：3 个 worker 会同时启动，
+  // 前 3 个文件的 begin 在第一次 chunk 之前就已全部发出，此时 hijack 还来不及生效，
+  // 测不出「钉住」与「不钉住」的差别（本测试一度因此假绿）。
+  // 用 5 个文件时，第 4/5 个文件的 begin 要等某个 worker 空出来才发出，
+  // 必然晚于 hijack，才真正检验「后续文件去向是否被中途导航带偏」。
+  let hijacked = false;
+  const hijack = () => {
+    if (hijacked) return;
+    hijacked = true;
+    OB.state.bucket = "hijacked-bucket";
+    OB.state.prefix = "evil/";
+  };
+  const files = [
+    makeFile("a.txt", 10, { onRead: hijack }), // 读取第一个分片时用户就导航走了
+    makeFile("b.txt", 10),
+    makeFile("c.txt", 10),
+    makeFile("d.txt", 10), // 这两个的 begin 必然晚于 hijack
+    makeFile("e.txt", 10),
+  ];
+
+  OB.els.fileInput.files = files;
+  await OB.els.fileInput.onchange();
+
+  assert.ok(hijacked, "测试前提：中途应已发生导航");
+
+  const begins = uploadLog.filter((c) => c.method === "upload/begin");
+  assert.strictEqual(begins.length, files.length, "每个文件都应发起 begin");
+  for (const b of begins) {
+    assert.strictEqual(b.bucket, "bucket-a",
+      `文件 ${b.path} 被传到了 ${b.bucket}（上下文未钉住，中途导航改变了文件去向）`);
+    assert.ok(b.path.startsWith("dir/"),
+      `文件应落在钉住的 dir/ 前缀下，实际 ${b.path}`);
+  }
+  const keys = begins.map((b) => b.path).sort();
+  assert.deepStrictEqual(keys,
+    ["dir/a.txt", "dir/b.txt", "dir/c.txt", "dir/d.txt", "dir/e.txt"],
+    "全部文件的 key 应各自正确，不受中途导航影响");
+
+  // 自检：确认真的有文件的 begin 发生在 hijack 之后。
+  // 没有这条断言，将来并发度或文件数被改动会让测试悄悄退化成假绿。
+  const firstChunkIdx = uploadLog.findIndex((c) => c.method === "upload/chunk");
+  const beginsAfterHijack = uploadLog.slice(firstChunkIdx)
+    .filter((c) => c.method === "upload/begin").length;
+  assert.ok(beginsAfterHijack >= 1,
+    `应至少有 1 个文件的 begin 晚于导航动作，实际 ${beginsAfterHijack} 个；`
+    + "否则本测试未形成有效检验（需调大文件数或调低 UP_CONC）");
+
+  // 收尾刷新守卫：用户已离开目标目录，不应重置他的视图（不发 objects/list）
+  assert.ok(!invocations.some((c) => c.method === "objects/list"),
+    "用户已导航离开，上传结束不应刷新列表把用户拽走");
+});
+
+test("单文件上传：进入上云阶段切不确定态，完成后清除", async () => {
+  const { win } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+
+  // 包装 invoke，在 upload/complete 被调用的瞬间记录进度条状态。
+  // 这一刻正是「分片已落盘、真正上云开始」的分界点。
+  const rawInvoke = OB.invoke;
+  let classDuringComplete = null;
+  let pctDuringComplete = null;
+  OB.invoke = function (method, params, opts) {
+    if (method === "upload/complete") {
+      const fill = win.document.getElementById("dlFill");
+      const pct = win.document.getElementById("dlPct");
+      classDuringComplete = fill ? fill.className : null;
+      pctDuringComplete = pct ? pct.textContent : null;
+    }
+    return rawInvoke(method, params, opts);
+  };
+
+  OB.els.fileInput.files = [makeFile("solo.txt", 10)];
+  await OB.els.fileInput.onchange();
+
+  assert.ok(classDuringComplete !== null, "应捕获到 upload/complete 调用");
+  assert.ok(classDuringComplete.includes("indeterminate"),
+    `上云阶段进度条应为不确定态，实际 className=${classDuringComplete}`);
+  assert.notStrictEqual(pctDuringComplete, "100%",
+    "上云阶段不应显示 100%（那会让人误以为已完成），实际=" + pctDuringComplete);
+
+  // 完成后必须清除不确定态，否则填充条会带着 transform 动画继续滑动
+  const fillAfter = win.document.getElementById("dlFill");
+  assert.ok(!fillAfter.className.includes("indeterminate"),
+    "完成后应清除不确定态动画");
+  assert.strictEqual(fillAfter.style.width, "100%", "完成后填充条应为 100%");
 });
