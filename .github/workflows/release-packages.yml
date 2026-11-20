@@ -31,12 +31,12 @@ jobs:
         include:
           - os: windows-latest
             target: windows-x64
-          - os: macos-14        # Apple Silicon
+          - os: macos-15        # Apple Silicon arm64（macos-14 已由 GitHub 下线）
             target: darwin-arm64
-          # Intel 版（darwin-x64）需要 macos-13 runner（最后一代 Intel runner）。
-          # 实测 v1.2.0 排队 16h+ 仍拿不到机器（一直 queued），会阻塞 publish，故暂时禁用。
-          # 等 self-hosted Intel Mac runner 就绪后把下面两行加回 matrix 即可：
-          #   - os: macos-13        # Intel
+          # Intel 版（darwin-x64）历史上用 macos-13 runner，实测排队 16h+ 拿不到机器，故禁用。
+          # GitHub 现提供 macos-15-intel / macos-26-intel；如需启用 Intel 包，
+          # 把下面两行加回 matrix（公共仓库容量仍可能紧张）：
+          #   - os: macos-15-intel  # Intel
           #     target: darwin-x64
           # 或改用 self-hosted：
           #   - os: [self-hosted, macOS, x64]
