@@ -94,9 +94,12 @@
     }
 
     // 宿主已自动连接（凭据在 Sidecar 内存）：直接进入浏览器视图。
-    // 快捷图标打开的实例例外：sidecar 的连接状态是全局单例，这里查到的
-    // 「已连接」是其他实例（连接树 tab）的连接——快捷 tab 无自己的连接
-    // 上下文，跟进浏览器只会复刻别人的内容；应停在连接表单由用户自行连接。
+    // Sidecar 会话按 connectionId 隔离（见 backend/session.go）：宿主托管连接用
+    // context.connectionId（上方已写入 OB.state.connectionId），自建表单连接用
+    // 本标签页生成的 tabSessionId——connection/status 只会查到「本标签页自己的」
+    // 会话，不会再复刻其他标签页的连接内容。
+    // 快捷图标打开的实例没有连接上下文，天然查不到已连接会话，会停在连接表单；
+    // fromShortcut 判断保留作为双保险。
     if (!fromShortcut) {
       try {
         const st = await OB.invoke("connection/status", {});

@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 )
 
 // Request / Response 实现 JSON-RPC 2.0 over newline-delimited JSON (stdio-jsonl)
@@ -30,17 +29,8 @@ type Response struct {
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
-// PluginState 当前连接状态。driver 由 newDriver 按 provider 构造，
-// handler 层不感知具体厂商实现。
-type PluginState struct {
-	cfg    ConnConfig
-	driver StorageDriver
-}
-
-var (
-	state   = &PluginState{}
-	stateMu sync.Mutex
-)
+// 连接状态（cfg + driver）按连接 ID 隔离，见 session.go。
+// Sidecar 跨标签页共享，全局单例会让后打开的连接覆盖先打开的。
 
 func main() {
 	// 日志一律走 stderr，stdout 仅输出协议消息
@@ -96,6 +86,11 @@ func main() {
 }
 
 func dispatch(req Request) (interface{}, *RPCError) {
+	// 先解析本次请求属于哪个连接：Sidecar 跨标签页共享，后续 getDriver /
+	// requireWritable / currentBucket 都据此定位会话，避免用到别的标签页的凭证。
+	// RPC 主循环串行执行，这里赋值不会被并发请求覆盖（见 session.go 说明）。
+	currentConn = extractConnID(req.Params)
+
 	switch req.Method {
 	case "plugin/initialize":
 		return handleInitialize(req.Params)

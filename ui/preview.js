@@ -50,12 +50,21 @@
     return null;
   };
 
-  // Markdown / 代码高亮用的两个库：随包本地资产优先（零外联、离线可用），
-  // 本地资产缺失时才回退 cdnjs（旧包或资产被剪枝的场景）。失败一律降级纯文本，不阻塞预览。
+  // Markdown / 代码高亮用的两个库：只用随包本地资产（零外联、离线可用）。
+  //
+  // 不回退 CDN：宿主沙箱的 CSP script-src 在任何形态下都不放行外部域名——
+  //   - 桌面端：script-src 'unsafe-inline' blob: <插件资产源>（default-src 'none'）
+  //   - 开发宿主（dbx-plugin dev）：script-src 'self' 'unsafe-inline' blob:
+  //   - Web 端：script-src 'self' 'unsafe-inline'
+  // 注意 host.network 权限只影响 connect-src（fetch/XHR），管不到 <script src>，
+  // 所以「声明权限就能让 CDN 回退生效」这条路走不通。官方文档亦明确要求：
+  // 「不要把 Vite dev server 或 CDN 的脚本地址写进发行包」。
+  // 资产缺失时照旧降级纯文本、不阻塞预览（loadScriptAny 的失败路径不变）。
+  // 保留数组形式：loadScriptAny / loadStyleAny 的多候选逻辑无需改动。
   OB.shared.MD_ASSETS = {
-    marked: ["vendor/marked.min.js", "https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"],
-    hljs: ["vendor/highlight.min.js", "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"],
-    hljsCss: ["vendor/highlight-github.min.css", "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"],
+    marked: ["vendor/marked.min.js"],
+    hljs: ["vendor/highlight.min.js"],
+    hljsCss: ["vendor/highlight-github.min.css"],
   };
 
   const scriptCache = {};

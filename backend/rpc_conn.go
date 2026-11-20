@@ -34,10 +34,9 @@ func handleConnectionConnect(params json.RawMessage) (interface{}, *RPCError) {
 	if e != nil {
 		return nil, &RPCError{Code: -32000, Message: "连接失败: " + e.Error()}
 	}
-	stateMu.Lock()
-	state.cfg = c
-	state.driver = d
-	stateMu.Unlock()
+	// 按连接 ID 存会话（幂等：同一 ID 重复连接会替换旧 driver）。
+	// 这样多个标签页各自的连接互不覆盖——见 session.go 的问题背景。
+	putSession(currentConn, c, d)
 	// 预热 Windows 常驻目录选择器：首次点击批量下载时对话框毫秒级弹出，
 	// 不用等 PowerShell 冷启动。fire-and-forget，失败静默（点击时还有回退）。
 	warmPicker()
@@ -45,24 +44,23 @@ func handleConnectionConnect(params json.RawMessage) (interface{}, *RPCError) {
 }
 
 func handleConnectionDisconnect(params json.RawMessage) (interface{}, *RPCError) {
-	stateMu.Lock()
-	state.cfg = ConnConfig{}
-	state.driver = nil
-	stateMu.Unlock()
+	// 只拆除本次请求所属的连接，不影响其他标签页仍在使用的会话。
+	dropSession(currentConn)
 	return map[string]interface{}{"ok": true}, nil
 }
 
 // handleConnectionStatus：UI 启动时询问 Sidecar 当前是否已连接。
 // 宿主打开已保存连接时会先调 connection/connect（凭据已在 Sidecar 内存中），
 // UI 据此跳过凭据表单直接进入浏览视图，避免重复填写 Key。
+//
+// 只回答「本标签页所属连接」的状态：宿主托管连接带 connection.id，
+// 自建表单带前端注入的 connectionId，两者都查不到才回退 default 会话。
 func handleConnectionStatus(params json.RawMessage) (interface{}, *RPCError) {
-	stateMu.Lock()
-	cfg := state.cfg
-	ok := state.driver != nil
-	stateMu.Unlock()
-	if !ok {
+	s := getSession(currentConn)
+	if s == nil || s.driver == nil {
 		return map[string]interface{}{"connected": false}, nil
 	}
+	cfg := s.cfg
 	return map[string]interface{}{
 		"connected": true,
 		"provider":  cfg.Provider,
