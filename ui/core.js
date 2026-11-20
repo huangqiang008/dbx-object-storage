@@ -36,7 +36,7 @@
   // 构建版本号：必须与 manifest.json 的 version 及 backend 的 pluginVersion 一致。
   // 常驻显示在状态栏，用于确认宿主实际加载的是哪个版本（排查"改了却没生效"）。
   // 发版时三处（manifest.json / backend/oss.go / 此处）需一并修改。
-  OB.BUILD = "1.4.0";
+  OB.BUILD = "1.4.1";
 
   OB.COLORS = ["#22c55e", "#eab308", "#f97316", "#ef4444", "#3b82f6", "#a855f7"];
   OB.selectedColor = OB.COLORS[4];
