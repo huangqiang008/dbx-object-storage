@@ -4,6 +4,7 @@ package main
 // 逻辑自原 oss.go 平移，行为保持不变。
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -196,6 +197,35 @@ func (d *aliyunDriver) PutFromFile(bucket, path, filePath, mime string) error {
 
 // PutFromFileWithClass 分片上传并指定存储类别（2.5）。
 func (d *aliyunDriver) PutFromFileWithClass(bucket, path, filePath, mime, storageClass string) error {
+	return d.PutFromFileWithProgress(context.Background(), bucket, path, filePath, mime, storageClass, nil)
+}
+
+// ossProgressListener 把阿里云 SDK 的进度事件转发成 onProgress(sent, total)。
+//
+// SDK 从上传 goroutine（Routines(3) 并发分片）回调，可能被并发调用，
+// 因此不在此处累计——直接透传 event 里 SDK 已算好的 ConsumedBytes/TotalBytes
+// （它是全局累计值，不是单分片值），由上层 task 负责加锁与节流。
+type ossProgressListener struct {
+	onProgress func(sent, total int64)
+}
+
+func (l *ossProgressListener) ProgressChanged(e *oss.ProgressEvent) {
+	if l == nil || l.onProgress == nil || e == nil {
+		return
+	}
+	switch e.EventType {
+	case oss.TransferDataEvent, oss.TransferCompletedEvent:
+		l.onProgress(e.ConsumedBytes, e.TotalBytes)
+	}
+}
+
+// PutFromFileWithProgress 带进度回调与可取消 context 的分片上传。
+// 实现 upload_task.go 的 ProgressUploader 可选接口，使异步上传能推送真实进度。
+//
+// context 取消在分片上传路径上确实生效：UploadPart → bucket.do → doInner
+// 会取 contextArg 并传给 Conn.DoWithContext（bucket.go:1245-1249），
+// 底层 req.WithContext 使 HTTP 请求可被中断。
+func (d *aliyunDriver) PutFromFileWithProgress(ctx context.Context, bucket, path, filePath, mime, storageClass string, onProgress func(sent, total int64)) error {
 	b, err := d.bucket(bucket)
 	if err != nil {
 		return err
@@ -205,6 +235,13 @@ func (d *aliyunDriver) PutFromFileWithClass(bucket, path, filePath, mime, storag
 		return err
 	}
 	opts = append(opts, oss.Checkpoint(true, ""), oss.Routines(3))
+	if onProgress != nil {
+		opts = append(opts, oss.Progress(&ossProgressListener{onProgress: onProgress}))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opts = append(opts, oss.WithContext(ctx))
 	return b.UploadFile(path, filePath, 5*1024*1024, opts...)
 }
 

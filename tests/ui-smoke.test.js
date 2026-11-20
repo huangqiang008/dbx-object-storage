@@ -131,7 +131,13 @@ function loadUI() {
   // 上传相关状态：供「钉住上下文」测试断言文件实际去向
   let uploadSeq = 0;
   const uploadState = {};   // uploadId → { bucket, key, written, size }
-  const uploadLog = [];     // 按时间顺序记录 begin/chunk/complete/abort 调用
+  const uploadLog = [];     // 按时间顺序记录 begin/chunk/complete/status/abort 调用
+  // 异步上传任务（issue #11 第二批）：complete 返回 taskId，前端轮询 status 等终态。
+  let taskSeq = 0;
+  const taskState = {};
+  // 可由测试改写：让"上云"阶段持续 N 轮 status 轮询才结束，
+  // 用于验证前端确实在等待终态而不是拿到 taskId 就当完成。
+  let uploadCloudTicks = 0;
   const win = {
     document: doc,
     // opaque origin 下 clipboard API 通常不可用 → 走宿主桥
@@ -226,7 +232,39 @@ function loadUI() {
       case "upload/complete": {
         const st = uploadState[params.uploadId];
         uploadLog.push({ method, uploadId: params.uploadId, bucket: st && st.bucket, key: st && st.key });
-        return { ok: true, size: st ? st.written : 0 };
+        // 异步语义（issue #11 第二批）：complete 立即返回 taskId，真正上云在后台。
+        // 前端必须轮询 upload/status 等到终态才算完成——不返回 taskId 会让前端
+        // 走"兼容旧后端"分支，异步等待逻辑就完全测不到了。
+        const taskId = "task-" + (++taskSeq);
+        // cloudPhaseTicks 控制"上云"要几轮轮询才结束：0 = 立即完成，
+        // >0 则前 N 次 status 返回 running，用来验证前端确实在等待。
+        taskState[taskId] = {
+          state: "running",
+          ticks: 0,
+          remain: (typeof uploadCloudTicks === "number") ? uploadCloudTicks : 0,
+          bucket: st && st.bucket,
+          key: st && st.key,
+          total: st ? st.size : 0,
+        };
+        return { taskId, async: true, ok: true, size: st ? st.written : 0 };
+      }
+      case "upload/status": {
+        const t = taskState[params.taskId];
+        if (!t) return { state: "failed", error: "任务不存在" };
+        uploadLog.push({ method, taskId: params.taskId });
+        if (t.remain > 0) {
+          t.remain--;
+          t.ticks++;
+          return { taskId: params.taskId, state: "running", sent: Math.floor(t.total / 2), total: t.total, error: "" };
+        }
+        t.state = "done";
+        return { taskId: params.taskId, state: "done", sent: t.total, total: t.total, error: "" };
+      }
+      case "upload/cancel": {
+        const t = taskState[params.taskId];
+        if (t) t.state = "cancelled";
+        uploadLog.push({ method, taskId: params.taskId });
+        return { ok: true, state: t ? t.state : "cancelled" };
       }
       case "upload/abort":
       case "upload/release":
@@ -263,7 +301,13 @@ function loadUI() {
     }
   }
   // 沙箱里的 window 就是 sandbox 本身（脚本通过 window.OB 通信）
-  return { win: sandbox, doc, invocations, registry, scripts, uploadLog, uploadState, loadError: env.loadError };
+  return {
+    win: sandbox, doc, invocations, registry, scripts,
+    uploadLog, uploadState, taskState,
+    // 让测试控制"上云"持续几轮轮询（默认 0 = 立即完成）
+    setCloudTicks: (n) => { uploadCloudTicks = n; },
+    loadError: env.loadError,
+  };
 }
 
 // loadUIDiagnose 逐个脚本加载，报告第一个失败的位置（排查加载期错误用）。
@@ -568,4 +612,59 @@ test("单文件上传：进入上云阶段切不确定态，完成后清除", as
   assert.ok(!fillAfter.className.includes("indeterminate"),
     "完成后应清除不确定态动画");
   assert.strictEqual(fillAfter.style.width, "100%", "完成后填充条应为 100%");
+});
+
+test("单文件上传：complete 返回 taskId 后必须轮询到终态才算完成", async () => {
+  // 让"上云"阶段需要 2 轮 status 才结束：第 1 轮 running、第 2 轮 done。
+  // 若前端拿到 taskId 就当完成（旧行为），status 调用数会是 0。
+  const { win, uploadLog, setCloudTicks } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  setCloudTicks(1);
+
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+
+  OB.els.fileInput.files = [makeFile("big.bin", 10)];
+  await OB.els.fileInput.onchange();
+
+  const completes = uploadLog.filter((c) => c.method === "upload/complete");
+  assert.strictEqual(completes.length, 1, "应调用一次 complete");
+
+  const statuses = uploadLog.filter((c) => c.method === "upload/status");
+  assert.ok(statuses.length >= 2,
+    `complete 返回 taskId 后前端必须轮询 status 等待终态，实际只轮询 ${statuses.length} 次`
+    + "（0 次说明把 taskId 当成了完成，会在文件传完前就报成功）");
+
+  // 上传应最终成功：进度卡显示完成态而非错误
+  const msg = win.document.getElementById("dlMsg");
+  assert.ok(!msg.className.includes("err"),
+    "等待终态后上传应成功，实际卡片为错误态: " + msg.textContent);
+});
+
+test("上云阶段点取消：应调用 upload/cancel 中止后端任务", async () => {
+  // 让上云阶段足够长（10 轮），期间把 cancelled 置真，
+  // 前端应在下一轮轮询时调 upload/cancel 而不是干等到超时。
+  const { win, uploadLog, setCloudTicks } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  setCloudTicks(10);
+
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+
+  OB.els.fileInput.files = [makeFile("big.bin", 10)];
+  const done = OB.els.fileInput.onchange();
+  // 等第一次 status 轮询发生后（上云阶段已开始）再取消
+  await new Promise((r) => setTimeout(r, 100));
+  OB.shared.dl.cancelled = true;
+  await done;
+
+  const cancels = uploadLog.filter((c) => c.method === "upload/cancel");
+  assert.ok(cancels.length >= 1,
+    "上云阶段取消应调用 upload/cancel 中止后端任务（否则后端会继续白传，浪费带宽与配额）");
 });

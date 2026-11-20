@@ -281,6 +281,40 @@ func (d *s3Driver) PutFromFile(bucket, path, filePath, mime string) error {
 
 // PutFromFileWithClass 流式上传并指定存储类别（2.5）。
 func (d *s3Driver) PutFromFileWithClass(bucket, path, filePath, mime, storageClass string) error {
+	return d.PutFromFileWithProgress(context.Background(), bucket, path, filePath, mime, storageClass, nil)
+}
+
+// progressReader 实现 minio-go 的 PutObjectOptions.Progress 钩子。
+//
+// minio 内部用 newHook(source, hook) 包装数据流：每从文件读出 n 字节，就以
+// 同样这 n 字节调用 hook.Read。因此这里只需累计长度即可得到已上传字节数。
+//
+// ⚠️ Read 必须永不返回错误（io.EOF 也不行）：hookReader.Read 会把 hook 的
+// 非 EOF 错误直接冒泡为整个上传失败（hook-reader.go），一个"进度统计失败"
+// 不该让用户的上传挂掉。返回 (len(b), nil) 即表示"已消费全部通知字节"。
+type progressReader struct {
+	mu         sync.Mutex
+	sent       int64
+	total      int64
+	onProgress func(sent, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n := len(b)
+	p.mu.Lock()
+	p.sent += int64(n)
+	sent, total := p.sent, p.total
+	cb := p.onProgress
+	p.mu.Unlock()
+	if cb != nil {
+		cb(sent, total)
+	}
+	return n, nil
+}
+
+// PutFromFileWithProgress 带进度回调与可取消 context 的流式上传。
+// 实现 upload_task.go 的 ProgressUploader 可选接口，使异步上传能推送真实进度。
+func (d *s3Driver) PutFromFileWithProgress(ctx context.Context, bucket, path, filePath, mime, storageClass string, onProgress func(sent, total int64)) error {
 	b, err := d.pickBucket(bucket)
 	if err != nil {
 		return err
@@ -298,7 +332,13 @@ func (d *s3Driver) PutFromFileWithClass(bucket, path, filePath, mime, storageCla
 	if err != nil {
 		return err
 	}
-	_, err = d.cl.PutObject(context.Background(), b, path, f, st.Size(), opts)
+	if onProgress != nil {
+		opts.Progress = &progressReader{total: st.Size(), onProgress: onProgress}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err = d.cl.PutObject(ctx, b, path, f, st.Size(), opts)
 	return err
 }
 

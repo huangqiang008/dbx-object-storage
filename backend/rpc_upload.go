@@ -358,9 +358,16 @@ func persistUploadMeta(sess *uploadSession) {
 // removeUploadFiles 清理会话的临时文件与元数据（正常完成/取消时调用）
 func removeUploadFiles(sess *uploadSession) {
 	sess.file.Close()
-	os.Remove(sess.tmpPath)
-	os.Remove(sess.metaPath)
-	os.Remove(strings.TrimSuffix(sess.tmpPath, ".part") + ".meta")
+	removeUploadFilesByPath(sess.tmpPath, sess.metaPath)
+}
+
+// removeUploadFilesByPath 只按路径清理，不碰文件句柄。
+// 供异步上传任务使用：那时句柄已在 complete 的同步阶段关闭
+// （Windows 下文件被占用时 Remove 会失败，故顺序不能颠倒）。
+func removeUploadFilesByPath(tmpPath, metaPath string) {
+	os.Remove(tmpPath)
+	os.Remove(metaPath)
+	os.Remove(strings.TrimSuffix(tmpPath, ".part") + ".meta")
 }
 
 // takeUploadSession 按 uploadId 取会话并从内存表摘除，同时校验归属连接。
@@ -411,6 +418,15 @@ func handleUploadChunk(params json.RawMessage) (interface{}, *RPCError) {
 	return map[string]interface{}{"written": sess.written}, nil
 }
 
+// handleUploadComplete 提交上传任务并**立即返回 taskId**。
+//
+// 为什么不再同步等：真正的上云可能持续数分钟，而 RPC 主循环是串行的
+// （main.go），同步等待会独占整条通道，让其他标签页/其他并发文件的所有请求
+// （连 upload/chunk 都算）排队等待——前端 3 路并发因此形同虚设。
+// 改为后台 goroutine 执行 + 事件推进度，详见 upload_task.go。
+//
+// 兼容性：回包同时带 ok 字段，老前端把它当"已完成"也不会崩，只是拿不到进度；
+// 新前端应改用 taskId + 事件/upload/status。
 func handleUploadComplete(params json.RawMessage) (interface{}, *RPCError) {
 	var p struct {
 		UploadID string `json:"uploadId"`
@@ -422,20 +438,90 @@ func handleUploadComplete(params json.RawMessage) (interface{}, *RPCError) {
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "上传会话不存在或已结束"}
 	}
-	// 先确认驱动可用再摘除分片：若在未连接时就清理，用户已传的分片全丢、
-	// 续传白费（连接恢复后只能从头重传）。取不到驱动时会话已摘除，
-	// 但 .part/.meta 保留在磁盘上，下次 begin 仍可接管。
+	// 必须在**同步阶段**取驱动：getDriver 依赖包级 currentConn，而它由 dispatch
+	// 按请求设置。等 goroutine 真正跑起来时，主循环早已处理完别的请求、
+	// currentConn 已被改写，那时再取会拿到**别的连接的凭证**。
 	d, rerr := getDriver()
+	if rerr != nil {
+		// 未连接：会话已摘除，但 .part/.meta 保留在磁盘上，
+		// 下次 begin 仍可接管续传，用户已传的字节不白费。
+		return nil, rerr
+	}
+
+	// 关闭分片句柄后再交给后台任务：驱动会自行打开该文件读取；
+	// 且 Windows 下文件被占用时 Remove 会失败，任务结束的清理依赖句柄已释放。
+	if sess.file != nil {
+		sess.file.Close()
+		sess.file = nil
+	}
+
+	taskID, rerr := newUploadID()
 	if rerr != nil {
 		return nil, rerr
 	}
-	// 必须在 PutFromFile 之后再删分片：驱动要从该文件读取内容。
-	// 同时清掉 .meta，否则会留下没有分片的孤儿元数据。
-	defer removeUploadFiles(sess)
-	if err := d.PutFromFileWithClass(sess.bucket, sess.key, sess.tmpPath, sess.mime, sess.storageClass); err != nil {
-		return nil, &RPCError{Code: -32000, Message: "上传失败: " + err.Error()}
+	task := &uploadTask{
+		id:           taskID,
+		connID:       sess.connID,
+		driver:       d,
+		bucket:       sess.bucket,
+		key:          sess.key,
+		tmpPath:      sess.tmpPath,
+		metaPath:     sess.metaPath,
+		mime:         sess.mime,
+		storageClass: sess.storageClass,
+		size:         sess.size,
+		state:        taskRunning,
 	}
-	return map[string]interface{}{"ok": true, "size": sess.written}, nil
+	registerTask(task)
+	go task.run()
+
+	return map[string]interface{}{
+		"taskId": taskID,
+		"async":  true,
+		// 兼容旧前端：不带 taskId 处理的调用方仍会拿到 ok:true
+		"ok":   true,
+		"size": sess.written,
+	}, nil
+}
+
+// handleUploadStatus 查询异步上传任务状态。
+// 事件（uploadProgressEvent）是主通道；本方法是丢事件时的兜底轮询入口。
+func handleUploadStatus(params json.RawMessage) (interface{}, *RPCError) {
+	var p struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &RPCError{Code: -32602, Message: "invalid params"}
+	}
+	t := getTask(strings.TrimSpace(p.TaskID))
+	if t == nil {
+		return nil, &RPCError{Code: -32000, Message: "上传任务不存在或已过期"}
+	}
+	// 归属校验：不能让一个连接查到别的连接的任务状态（含其 bucket/key）
+	if t.connID != "" && t.connID != currentConn {
+		return nil, &RPCError{Code: -32000, Message: "上传任务不存在或已过期"}
+	}
+	return t.snapshot(), nil
+}
+
+// handleUploadCancel 取消进行中的上传任务。幂等：终态任务返回当前状态。
+func handleUploadCancel(params json.RawMessage) (interface{}, *RPCError) {
+	var p struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &RPCError{Code: -32602, Message: "invalid params"}
+	}
+	id := strings.TrimSpace(p.TaskID)
+	t := getTask(id)
+	if t == nil {
+		return map[string]interface{}{"ok": true}, nil // 幂等
+	}
+	if t.connID != "" && t.connID != currentConn {
+		return map[string]interface{}{"ok": true}, nil
+	}
+	cancelTask(id)
+	return map[string]interface{}{"ok": true, "state": t.snapshot()["state"]}, nil
 }
 
 func handleUploadAbort(params json.RawMessage) (interface{}, *RPCError) {

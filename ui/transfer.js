@@ -469,6 +469,138 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   // 再多容易触发服务端限流（429）。
   const UP_CONC = 3;
 
+  // ---------- 异步上传任务（issue #11 第二批） ----------
+  //
+  // upload/complete 现在是**异步**的：它立即返回 taskId，真正上云在后端后台
+  // 执行（详见 backend/upload_task.go）。这样 RPC 主循环不再被数分钟的上传独占，
+  // 多文件的 3 路并发才真正生效。
+  //
+  // 代价是前端必须等任务终态，不能像以前那样"complete 返回即完成"——
+  // 否则会在文件还没传上去时就报成功、刷新列表看不到新文件。
+  //
+  // 两条获取进度的通道，互为补充：
+  //   1. 事件推送（主）：后端经 host.events 推 <plugin>/uploadProgress；
+  //   2. upload/status 轮询（兜底）：宿主不支持 onEvent、或事件丢失时使用。
+  // 两者都失败才算上传失败。
+
+  const UPLOAD_PROGRESS_EVENT = "com.object.browser/uploadProgress";
+  // 轮询间隔与兜底超时。兜底超时取后端 idle 看门狗（10 分钟）之上留余量：
+  // 后端判定卡死会主动把任务置为 cancelled/failed 并推终态事件，
+  // 前端这个超时只是"连事件都收不到"时的最后防线，不该先于后端触发。
+  const TASK_POLL_INTERVAL = 1000;
+  const TASK_WAIT_TIMEOUT = 30 * 60 * 1000;
+
+  // taskId → 等待者。事件到达时唤醒对应的 waitForTask。
+  const taskWaiters = new Map();
+  let taskEventHooked = false;
+
+  // hookUploadEvents 订阅后端的上传进度事件（只做一次）。
+  // 返回是否订阅成功：宿主无 onEvent（老版本/Web 宿主）时退回轮询。
+  function hookUploadEvents() {
+    if (taskEventHooked) return true;
+    const dp = window.dbxPlugin;
+    if (!dp || typeof dp.onEvent !== "function") return false;
+    try {
+      dp.onEvent((msg) => {
+        if (!msg || typeof msg.method !== "string") return;
+        // 用后缀匹配，避免插件 id 变更时失配
+        if (msg.method !== UPLOAD_PROGRESS_EVENT && !msg.method.endsWith("/uploadProgress")) return;
+        const p = msg.params || {};
+        const taskId = p.taskId;
+        if (!taskId) return;
+        const w = taskWaiters.get(taskId);
+        if (!w) return; // 无人等待（例如任务已被清理），忽略
+        w.onEvent(p);
+      });
+      taskEventHooked = true;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // waitForUploadTask 等待异步上传任务到达终态。
+  // resolve {state, sent, total, error}；state ∈ done|failed|cancelled。
+  //
+  // opts.onProgress(sent,total,state)：进度回调（节流由后端做，这里直接转发）。
+  // opts.shouldCancel()：每轮检查，返回 true 则请求后端取消并结束等待。
+  function waitForUploadTask(taskId, opts) {
+    const o = opts || {};
+    // 建立事件订阅（幂等）。宿主无 onEvent 时内部返回 false，不影响后续轮询兜底。
+    hookUploadEvents();
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let pollTimer = 0;
+      let timeoutTimer = 0;
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        taskWaiters.delete(taskId);
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = 0; }
+        if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = 0; }
+        resolve(result);
+      };
+
+      const isTerminal = (s) => s === "done" || s === "failed" || s === "cancelled";
+
+      const handle = (snap) => {
+        if (!snap) return;
+        if (o.onProgress) {
+          try { o.onProgress(snap.sent || 0, snap.total || 0, snap.state); } catch (e) { /* 回调异常不影响等待 */ }
+        }
+        if (isTerminal(snap.state)) {
+          finish({ state: snap.state, sent: snap.sent || 0, total: snap.total || 0, error: snap.error || "" });
+        }
+      };
+
+      taskWaiters.set(taskId, { onEvent: handle });
+
+      const poll = async () => {
+        try {
+          const snap = await OB.invoke("upload/status", { taskId });
+          handle(snap);
+        } catch (e) {
+          // 任务不存在/已过期：视为失败，避免永久等待
+          finish({ state: "failed", sent: 0, total: 0, error: (e && e.message) || String(e) });
+        }
+      };
+
+      // 用户取消：请求后端中止（后端 ctx 取消会让 SDK 停止发送）
+      const checkCancel = async () => {
+        if (!o.shouldCancel || !o.shouldCancel()) return;
+        try { await OB.invoke("upload/cancel", { taskId }); } catch (e) { /* 幂等，忽略 */ }
+        finish({ state: "cancelled", sent: 0, total: 0, error: "" });
+      };
+
+      // 无论是否有事件通道都起轮询：事件可能丢失，轮询保证最终一致。
+      // 有事件时轮询只是兜底，通常会被事件抢先。
+      //
+      // 用递归 setTimeout 而不是 setInterval，有两个原因：
+      //   1) 单次 status 请求慢于轮询间隔时，setInterval 会让请求重叠堆积；
+      //      递归链保证「上一轮结束才排下一轮」。
+      //   2) 沙箱只保证提供 setTimeout/clearTimeout，setInterval 未必存在。
+      const scheduleNext = () => {
+        if (settled) return;
+        pollTimer = setTimeout(tick, TASK_POLL_INTERVAL);
+      };
+      const tick = async () => {
+        if (settled) return;
+        await checkCancel();
+        if (settled) return;
+        await poll();
+        scheduleNext();
+      };
+
+      timeoutTimer = setTimeout(() => {
+        finish({ state: "failed", sent: 0, total: 0, error: I18N.t("upload.taskTimeout") });
+      }, TASK_WAIT_TIMEOUT);
+      // 立即查一次：小文件上云极快，任务可能在订阅建立前就已结束。
+      tick();
+    });
+  }
+
   // pinUploadContext 在批次开始时钉住上传目标上下文。
   //
   // 为什么必须钉住：进度卡只是右下角浮动卡片（styles.css .dl-card，position:fixed），
@@ -487,20 +619,16 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   //
   // ctx：由 pinUploadContext 钉住的目标上下文（bucket/prefix/storageClass），
   //      整批共用，不随用户中途导航而变。
-  // onProgress：字节进度回调，**传 null 表示完全不做字节级上报**。
-  //   单文件上传传 dlProgress（能看到实时字节数）；多文件并发必须传 null——
-  //   3 个 worker 同时往同一张进度卡写字节数会互相覆盖成乱跳的数字，此时
-  //   进度由外层按「项」推进（dlProgressItems），它只在单个文件**真正完成**
-  //   （含上云）后才 +1，因此不会出现"字节写完就显示 100%"的假进度。
-  // onUploading：进入「上云」阶段（分片已全部落盘、开始 upload/complete）时回调一次。
-  //   单文件传它把进度卡切到不确定态；多文件传它累加在途上云计数。
-  async function uploadOneFile(f, key, ctx, onProgress, onUploading) {
+  // hooks（全部可选）：
+  //   onProgress(written,total)      第一跳：分片写入 sidecar 本地临时文件的字节进度。
+  //                                  **省略即完全不上报**——多文件并发必须省略，
+  //                                  否则 3 个 worker 抢写同一张进度卡会互相覆盖成乱跳的数字。
+  //   onUploading(name)              进入第二跳（上云）时回调一次。
+  //   onCloudProgress(sent,total)    第二跳的真实云端字节进度（来自后端事件/轮询）。
+  async function uploadOneFile(f, key, ctx, hooks) {
+    const h = hooks || {};
     let uploadId = null;
-    // 不做默认回退：null 就是"不上报"。早先这里写成
-    //   const report = onProgress || ((w, t) => dlProgress(w, t));
-    // 导致传 null 反而回退到字节级上报，与注释意图相反，并发下进度卡被抢写。
-    const report = onProgress || null;
-    const emit = (w, t) => { if (report) report(w, t); };
+    const emit = (w, t) => { if (h.onProgress) h.onProgress(w, t); };
     try {
       const beg = await OB.invoke("upload/begin", {
         bucket: ctx.bucket, path: key, size: f.size, mime: f.type || "",
@@ -523,14 +651,29 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
         offset = (r && typeof r.written === "number") ? r.written : offset + buf.byteLength;
         emit(offset, f.size);
       }
-      // 分片已全部落到 sidecar 本地临时文件，接下来才是真正的上云阶段。
-      // 这一步可能持续数分钟（200MB 在 500KB/s 上行下约 6.7 分钟），且后端
-      // 目前不回传进度，所以通知外层切换显示，避免停在"100%"让人误以为卡死。
-      // 真实字节进度需要后端推送事件，见 issue #11 第二批。
-      if (onUploading) onUploading(f.name);
-      await OB.invoke("upload/complete", { uploadId }, { timeoutMs: 600000 });
-      uploadId = null; // 已完成，后续失败不应再 abort（分片已被后端清理）
-      return { ok: true, key };
+
+      // ---- 第二跳：真正上云 ----
+      // complete 立即返回 taskId，上传在后端后台进行（backend/upload_task.go）。
+      // 这里必须等到任务终态才算这个文件传完：否则会在上传仍在进行时就报成功、
+      // 刷新列表也看不到新文件。
+      if (h.onUploading) h.onUploading(f.name);
+      const comp = await OB.invoke("upload/complete", { uploadId });
+      // 会话已被 complete 摘除（takeUploadSession），后续失败不应再 abort/release
+      uploadId = null;
+
+      const taskId = comp && comp.taskId;
+      if (!taskId) {
+        // 兼容旧后端（同步 complete，无 taskId）：返回即完成
+        return { ok: true, key };
+      }
+
+      const res = await waitForUploadTask(taskId, {
+        onProgress: h.onCloudProgress,
+        shouldCancel: () => OB.shared.dl.cancelled,
+      });
+      if (res.state === "done") return { ok: true, key };
+      if (res.state === "cancelled") throw new Error(I18N.t("upload.cancelled"));
+      throw new Error(res.error || I18N.t("upload.cloudFail"));
     } catch (e) {
       // 取消时**不** abort：abort 会连同已落盘的分片一起删掉，
       // 那样「取消后重传从断点继续」就失效了（分片没了，只能从头传）。
@@ -580,11 +723,23 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     let cancelled = false;
 
     if (files.length === 1) {
-      // ---------- 单文件：字节级进度，上云阶段切不确定态 ----------
+      // ---------- 单文件：两阶段字节进度 ----------
+      // 第一跳（写本地临时文件）与第二跳（上云）都用 dlProgress 显示真实字节；
+      // 第二跳开始时先切不确定态，一旦后端推来真实云端进度再恢复百分比条。
       const f = files[0];
       const key = uploadTargetKey(f, ctx);
       OB.openDlCard(f.name, "upload");
-      const res = await uploadOneFile(f, key, ctx, dlProgress, (name) => OB.dlUploadingPhase(name));
+      const res = await uploadOneFile(f, key, ctx, {
+        onProgress: dlProgress,
+        onUploading: (name) => OB.dlUploadingPhase(name),
+        onCloudProgress: (sent, total) => {
+          // 有真实字节进度就从不确定态切回百分比条（total 未知时维持不确定态）
+          if (total > 0) {
+            dlResetPhase();
+            dlProgress(sent, total);
+          }
+        },
+      });
       if (OB.shared.dl.cancelled) {
         cancelled = true;
       } else if (res.ok) {
@@ -624,13 +779,16 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
           // 当前项显示文件名（并发下多个文件交替，显示的是最近开始的那个）
           $("dlName").textContent = f.name;
           $("dlName").title = f.name;
-          // onProgress 传 null：并发下不做字节级上报，避免抢写同一张卡。
+          // 省略 onProgress：并发下不做字节级上报，避免抢写同一张卡；
+          // 进度由下方 dlProgressItems 按「项」推进（只在文件真正传完后 +1）。
           // onUploading 在进入上云阶段时被调用一次，用于统计在途上云文件数。
           let inCloudPhase = false;
-          const res = await uploadOneFile(f, key, ctx, null, () => {
-            inCloudPhase = true;
-            uploading++;
-            renderSummary();
+          const res = await uploadOneFile(f, key, ctx, {
+            onUploading: () => {
+              inCloudPhase = true;
+              uploading++;
+              renderSummary();
+            },
           });
           // 只有真正进入过上云阶段的文件才需要递减；
           // 在分片阶段就失败/取消的文件从未计数，减了会变负。

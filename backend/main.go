@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 )
 
 // Request / Response 实现 JSON-RPC 2.0 over newline-delimited JSON (stdio-jsonl)
@@ -29,6 +30,54 @@ type Response struct {
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
+// Notification 是 sidecar 主动推送给宿主的事件（JSON-RPC 通知：无 id）。
+// 协议见 sidecar-protocol.md §7；转发到前端需要 manifest 的 host.events 权限。
+type Notification struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
+}
+
+// ---------- stdout 单写者 ----------
+//
+// stdout 是 sidecar 与宿主之间唯一的协议通道，一行一条 JSON。
+// 原先只有主循环写它，天然串行；引入后台上传任务后，进度事件由
+// goroutine 推送，与主循环的响应并发写同一 bufio.Writer 会**交错**，
+// 宿主读到半截 JSON 就会解析失败、连接被判死。
+//
+// 因此所有写出都必须经 sendLocked：持锁 → 写 → Flush，保证「一行 = 一条完整消息」。
+// 锁只保护写与 Flush，序列化在锁外做，尽量缩短临界区。
+var (
+	stdoutMu sync.Mutex
+	stdoutW  *bufio.Writer
+)
+
+// sendLocked 序列化并原子写出一条消息（响应或通知）。
+func sendLocked(v interface{}) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("marshal error: %v", err)
+		return
+	}
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	if stdoutW == nil {
+		return
+	}
+	stdoutW.Write(b)
+	stdoutW.WriteByte('\n')
+	stdoutW.Flush()
+}
+
+// notify 主动推送一条事件。method 形如 "com.object.browser/uploadProgress"。
+//
+// 安全：params 里绝不可放凭据（协议明确要求「不要在事件中泄露 Secret」）。
+// 推送失败只记日志——事件是尽力而为的进度提示，丢一条不影响正确性，
+// 前端仍可轮询 upload/status 兜底。
+func notify(method string, params interface{}) {
+	sendLocked(Notification{JSONRPC: "2.0", Method: method, Params: params})
+}
+
 // 连接状态（cfg + driver）按连接 ID 隔离，见 session.go。
 // Sidecar 跨标签页共享，全局单例会让后打开的连接覆盖先打开的。
 
@@ -40,7 +89,9 @@ func main() {
 	cleanupStaleUploads()
 
 	reader := bufio.NewReader(os.Stdin)
-	writer := bufio.NewWriter(os.Stdout)
+	stdoutMu.Lock()
+	stdoutW = bufio.NewWriter(os.Stdout)
+	stdoutMu.Unlock()
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -74,14 +125,7 @@ func main() {
 		} else {
 			resp.Result = result
 		}
-		b, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("marshal error: %v", err)
-			continue
-		}
-		writer.Write(b)
-		writer.WriteByte('\n')
-		writer.Flush()
+		sendLocked(resp)
 	}
 }
 
@@ -158,6 +202,10 @@ func dispatch(req Request) (interface{}, *RPCError) {
 		return handleUploadChunk(req.Params)
 	case "upload/complete":
 		return handleUploadComplete(req.Params)
+	case "upload/status":
+		return handleUploadStatus(req.Params)
+	case "upload/cancel":
+		return handleUploadCancel(req.Params)
 	case "upload/abort":
 		return handleUploadAbort(req.Params)
 	case "upload/release":
