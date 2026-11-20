@@ -840,6 +840,22 @@ body {
   border-radius: 999px;
   transition: width .2s ease;
 }
+/* 不确定态：用于「分片已落盘、正在上传到云端」阶段。
+   该阶段后端不回传进度（见 issue #11），若继续显示固定 100% 会让人误以为
+   已经完成、甚至以为界面卡死，故用来回滑动的滑块表达"仍在进行、无法量化"。
+   .dl-bar 已是 overflow:hidden，滑块移出部分自然被裁掉。 */
+.dl-bar-fill.indeterminate {
+  width: 35%;
+  transition: none;
+  animation: dlIndeterminate 1.15s ease-in-out infinite;
+}
+@keyframes dlIndeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(286%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dl-bar-fill.indeterminate { animation: none; }
+}
 .dl-meta {
   display: flex;
   gap: 10px;
