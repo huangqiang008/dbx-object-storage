@@ -154,6 +154,10 @@ type UploadBeginParams struct {
 	Size   int64  `json:"size"` // 仅展示用，后端不依赖
 	// StorageClass 归一化存储类别（2.5）：standard/ia/archive，空 = 服务端默认。
 	StorageClass string `json:"storageClass"`
+	// Overwrite 目标已存在时是否直接覆盖（issue #11 第三批）。
+	// false 且目标已存在时，begin 返回 exists 标记（不创建分片、不返回 uploadId），
+	// 由前端弹框让用户决定；用户选择覆盖后带 overwrite:true 重新 begin。
+	Overwrite bool `json:"overwrite"`
 }
 
 func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
@@ -185,6 +189,9 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 	}
 	// 断点续传：先找这个对象是否已有历史分片（sidecar 上次崩溃/被杀会留下）。
 	// 命中则接管该文件继续追加，避免整个文件重传。
+	//
+	// 续传命中时**跳过**下方冲突检测：能走到续传，说明用户此前已经决定上传
+	// 这个文件，再问一遍"是否覆盖"只会打断续传流程。
 	if sess := claimResumableUpload(currentConn, bucket, p.Path, p.Size); sess != nil {
 		// 续传时以本次请求的存储类别为准：历史分片可能来自另一次上传。
 		sess.storageClass = storageClass
@@ -193,6 +200,29 @@ func handleUploadBegin(params json.RawMessage) (interface{}, *RPCError) {
 			"offset":   sess.written,
 			"resumed":  true,
 		}, nil
+	}
+
+	// 冲突检测：目标对象已存在时交由前端确认，避免静默覆盖（issue #11 第三批）。
+	//
+	// 放在续传检查之后、创建分片之前：字节一个都还没传，用户此刻跳过零成本。
+	// 注意这是 begin 时的前置检查，与真正写入（complete）之间仍有时间窗；
+	// 对象存储的 Put 本就是"最后写赢"，这里的目标是把决定权交还用户，
+	// 不是提供原子性（那需要服务端 If-None-Match 支持，两家 SDK 的分片
+	// 上传入口都不暴露，见 PR 说明）。
+	//
+	// Stat 出错（网络抖动等）按"不存在"放行：与旧行为完全一致（fail-open），
+	// 不给上传新增失败模式；只把 Stat 成功（= 对象确定存在）当作冲突。
+	if !p.Overwrite {
+		if d, rerr := getDriver(); rerr == nil {
+			if meta, e := d.Stat(bucket, p.Path); e == nil {
+				return map[string]interface{}{
+					"exists":   true,
+					"size":     meta.Size,
+					"modified": meta.Modified,
+					"etag":     meta.ETag,
+				}, nil
+			}
+		}
 	}
 
 	// 分片文件必须建在「稳定可推导」的路径上（uploadStem 由连接+桶+key+size 派生），

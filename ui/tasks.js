@@ -25,7 +25,9 @@
   // ---------- 记录 ----------
 
   // recordTask 记录一次批量传输的结果。
-  // info: { type, bucket, dstBucket, dir, keys, ok, failed[{key,error,rel}], cancelled }
+  // info: { type, bucket, dstBucket, dir, keys, ok, skipped, failed[{key,error,rel}], cancelled }
+  // skipped：上传冲突时用户选择跳过的数量（issue #11 第三批）——
+  // 不是失败也不是成功，如实入账让任务历史反映"有 N 个没传"。
   // 落盘 fire-and-forget：记录失败绝不阻塞主流程（传输结果本身已经完成）。
   OB.recordTask = function recordTask(info) {
     const o = info || {};
@@ -37,6 +39,7 @@
       dir: o.dir || "",
       keys: o.keys || [],
       ok: o.ok || 0,
+      skipped: o.skipped || 0,
       failed: o.failed || [],
       cancelled: !!o.cancelled,
       ts: Date.now(),
@@ -68,6 +71,7 @@
 
   function taskSummary(t) {
     const parts = [I18N.t("tasks.ok", { n: t.ok || 0 })];
+    if (t.skipped) parts.push(I18N.t("tasks.skip", { n: t.skipped }));
     if (t.failed && t.failed.length) parts.push(I18N.t("tasks.fail", { n: t.failed.length }));
     if (t.cancelled) parts.push(I18N.t("tasks.cancelled"));
     return parts.join(" · ");

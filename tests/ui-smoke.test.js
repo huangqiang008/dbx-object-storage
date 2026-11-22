@@ -95,10 +95,20 @@ class StubElement {
 // 从 index.html 解析出所有 id 与 class，创建对应的 stub 元素
 function buildDom(html) {
   const ids = new Set();
-  for (const m of html.matchAll(/\bid="([^"]+)"/g)) ids.add(m[1]);
+  const classOf = new Map();
+  // 必须连同 class 一起解析：模态框等元素初始带 class="modal hidden"，
+  // 若 stub 不带 hidden，`classList.contains("hidden")` 恒为 false，
+  // 「弹框是否打开」的判断会假阳性——测试会在弹框真正弹出前就去点按钮。
+  for (const m of html.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)) {
+    ids.add(m[1]);
+    const cls = /class="([^"]*)"/.exec(m[0]);
+    if (cls) classOf.set(m[1], cls[1]);
+  }
   const registry = new Map();
   for (const id of ids) {
     const el = new StubElement("div", id);
+    const cls = classOf.get(id);
+    if (cls) cls.split(/\s+/).filter(Boolean).forEach((c) => el._classes.add(c));
     registry.set(id, el);
   }
   return { registry, ids };
@@ -138,6 +148,9 @@ function loadUI() {
   // 可由测试改写：让"上云"阶段持续 N 轮 status 轮询才结束，
   // 用于验证前端确实在等待终态而不是拿到 taskId 就当完成。
   let uploadCloudTicks = 0;
+  // 模拟云端已存在的对象集合（"bucket/key"）。begin 据此返回 exists 冲突标记，
+  // complete 成功后把对象写入集合——行为与真实对象存储的覆盖语义一致。
+  const cloudObjects = new Set();
   const win = {
     document: doc,
     // opaque origin 下 clipboard API 通常不可用 → 走宿主桥
@@ -214,9 +227,15 @@ function loadUI() {
       // complete 记录该 uploadId 对应的 (bucket,key)。所有调用都留痕在 uploadLog，
       // 测试据此断言「中途改 OB.state 不会改变文件去向」。
       case "upload/begin": {
+        // 冲突检测（issue #11 第三批）：目标已存在且未声明覆盖 → 返回 exists 标记
+        const ckey = (params.bucket || "") + "/" + (params.path || "");
+        if (cloudObjects.has(ckey) && !params.overwrite) {
+          uploadLog.push({ method, bucket: params.bucket, path: params.path, exists: true });
+          return { exists: true, size: 100, modified: "2026-01-01T00:00:00Z", etag: "etag-old" };
+        }
         const uploadId = "up-" + (++uploadSeq);
         uploadState[uploadId] = { bucket: params.bucket, key: params.path, written: 0, size: params.size };
-        uploadLog.push({ method, bucket: params.bucket, path: params.path, uploadId });
+        uploadLog.push({ method, bucket: params.bucket, path: params.path, uploadId, overwrite: !!params.overwrite });
         return { uploadId, offset: 0, resumed: false };
       }
       case "upload/chunk": {
@@ -232,6 +251,8 @@ function loadUI() {
       case "upload/complete": {
         const st = uploadState[params.uploadId];
         uploadLog.push({ method, uploadId: params.uploadId, bucket: st && st.bucket, key: st && st.key });
+        // 上传成功 → 对象落地云端（此后同名 begin 会命中冲突）
+        if (st) cloudObjects.add((st.bucket || "") + "/" + (st.key || ""));
         // 异步语义（issue #11 第二批）：complete 立即返回 taskId，真正上云在后台。
         // 前端必须轮询 upload/status 等到终态才算完成——不返回 taskId 会让前端
         // 走"兼容旧后端"分支，异步等待逻辑就完全测不到了。
@@ -303,9 +324,11 @@ function loadUI() {
   // 沙箱里的 window 就是 sandbox 本身（脚本通过 window.OB 通信）
   return {
     win: sandbox, doc, invocations, registry, scripts,
-    uploadLog, uploadState, taskState,
+    uploadLog, uploadState, taskState, cloudObjects,
     // 让测试控制"上云"持续几轮轮询（默认 0 = 立即完成）
     setCloudTicks: (n) => { uploadCloudTicks = n; },
+    // 预置云端已存在的对象：begin 未声明 overwrite 时将命中冲突
+    seedCloud: (bucket, key) => { cloudObjects.add(bucket + "/" + key); },
     loadError: env.loadError,
   };
 }
@@ -667,4 +690,114 @@ test("上云阶段点取消：应调用 upload/cancel 中止后端任务", async
   const cancels = uploadLog.filter((c) => c.method === "upload/cancel");
   assert.ok(cancels.length >= 1,
     "上云阶段取消应调用 upload/cancel 中止后端任务（否则后端会继续白传，浪费带宽与配额）");
+});
+
+// ---------- 上传冲突确认（issue #11 第三批） ----------
+
+// waitForModal 等冲突弹框出现（worker 异步撞上冲突后才弹）。
+async function waitForModal(doc, timeout = 2000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const m = doc.getElementById("conflictModal");
+    if (m && !m.classList.contains("hidden")) return m;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("冲突弹框未在超时内出现（begin 可能未返回 exists 标记）");
+}
+
+test("上传冲突：选覆盖后带 overwrite:true 重新上传", async () => {
+  const { win, doc, uploadLog, seedCloud } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+  seedCloud("bucket-a", "dup.txt"); // 云端已有同名对象
+
+  OB.els.fileInput.files = [makeFile("dup.txt", 10)];
+  const p = OB.els.fileInput.onchange();
+  await waitForModal(doc);
+  doc.getElementById("conflictOverwrite").onclick();
+  await p;
+
+  const begins = uploadLog.filter((c) => c.method === "upload/begin");
+  assert.strictEqual(begins.length, 2, "应 begin 两次（首次命中冲突 + 覆盖重试）");
+  assert.strictEqual(begins[0].exists, true, "首次 begin 应命中冲突");
+  assert.strictEqual(begins[1].overwrite, true, "覆盖重试的 begin 应带 overwrite:true");
+  const completes = uploadLog.filter((c) => c.method === "upload/complete");
+  assert.strictEqual(completes.length, 1, "选择覆盖后应完成上传");
+});
+
+test("上传冲突：全部跳过后记忆生效，跳过的文件一个字节都不传", async () => {
+  const { win, doc, uploadLog, invocations, seedCloud } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+  seedCloud("bucket-a", "x.txt");
+  seedCloud("bucket-a", "y.txt");
+
+  OB.els.fileInput.files = [
+    makeFile("x.txt", 10),
+    makeFile("y.txt", 10),
+    makeFile("fresh.txt", 10),
+  ];
+  const p = OB.els.fileInput.onchange();
+  await waitForModal(doc);
+  doc.getElementById("conflictSkipAll").onclick();
+  await p;
+
+  // 两个冲突文件都不应进入传输（exists 之后再无 begin/complete）
+  const dupBegins = uploadLog.filter(
+    (c) => c.method === "upload/begin" && (c.path === "x.txt" || c.path === "y.txt")
+  );
+  for (const b of dupBegins) {
+    assert.strictEqual(b.exists, true, "冲突文件只应有命中冲突的那一次 begin");
+  }
+  const completes = uploadLog.filter((c) => c.method === "upload/complete");
+  assert.strictEqual(completes.length, 1, "只有 fresh.txt 完成上传");
+
+  // 任务记录：ok=1 skip=2 fail=0
+  const taskCalls = invocations.filter((c) => c.method === "tasks/append");
+  assert.ok(taskCalls.length >= 1, "应记录任务");
+  const rec = taskCalls[taskCalls.length - 1].params.record;
+  assert.strictEqual(rec.ok, 1, "成功数应为 1");
+  assert.strictEqual(rec.skipped, 2, "跳过数应为 2");
+  assert.strictEqual(rec.failed.length, 0, "跳过不算失败");
+});
+
+test("上传冲突：全部覆盖即时应用到仍在排队的冲突", async () => {
+  const { win, doc, uploadLog, seedCloud } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+  seedCloud("bucket-a", "x.txt");
+  seedCloud("bucket-a", "y.txt");
+
+  OB.els.fileInput.files = [
+    makeFile("x.txt", 10),
+    makeFile("y.txt", 10),
+    makeFile("fresh.txt", 10),
+  ];
+  const p = OB.els.fileInput.onchange();
+  await waitForModal(doc);
+  doc.getElementById("conflictOverwriteAll").onclick();
+  await p;
+
+  // 两个冲突文件都应带 overwrite:true 重新 begin——
+  // 第二个冲突轮到自己时 conflictMode 已是 overwriteAll，直接套用不再弹框。
+  const overwrites = uploadLog.filter(
+    (c) => c.method === "upload/begin" && c.overwrite
+  );
+  assert.strictEqual(overwrites.length, 2,
+    `x 与 y 都应带 overwrite 重新 begin，实际 ${overwrites.length} 个`
+    + "（若为 1，说明排队中的冲突没有即时应用已做的决定，会二次弹框）");
+  const completes = uploadLog.filter((c) => c.method === "upload/complete");
+  assert.strictEqual(completes.length, 3, "三个文件都应完成上传");
 });

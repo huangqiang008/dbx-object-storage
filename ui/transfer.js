@@ -11,7 +11,7 @@
   "use strict";
 
   // 纯工具：各模块自行从 window 取（utils.js / icons.js 是纯函数包，无状态依赖）
-  const { formatSize, base64FromArrayBuffer } = window.Utils;
+  const { esc, formatSize, fmtTime, base64FromArrayBuffer } = window.Utils;
   const $ = (id) => document.getElementById(id);
 
   // ---------- 下载（进度浮窗 + 可选保存位置） ----------
@@ -601,6 +601,114 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     });
   }
 
+  // ---------- 上传冲突确认（issue #11 第三批） ----------
+  //
+  // 目标对象已存在时，旧实现直接静默覆盖——不询问、不提示、不可逆，属数据丢失。
+  // 现在后端 upload/begin 会前置检测并返回 exists 标记，由这里弹框让用户决定。
+  //
+  // 两个并发要点（与另一已验证实现的模式一致）：
+  //   1. **弹框串行化**：3 个并发 worker 可能同时撞冲突，用一条 Promise 链
+  //      排队逐个弹，绝不同时叠两个框；
+  //   2. **"全部覆盖 / 全部跳过"即时应用**：决定记入 conflictMode 后，
+  //      仍在排队的冲突轮到自己时直接套用，不再弹框。
+
+  const CONFLICT_EVENT = "com.object.browser/uploadConflict";
+
+  // conflictMode 是整批范围内的记忆："" | "overwriteAll" | "skipAll"。
+  // 每批开始时重置（runUpload），不跨批保留——上一次上传的决定不该污染下一次。
+  let conflictMode = "";
+  // conflictChain 是弹框串行化的 Promise 链。
+  let conflictChain = Promise.resolve();
+
+  // hookConflictButtons 绑定冲突弹框的 4 个按钮（只做一次，IIFE 内加载期执行）。
+  // 弹框等待器挂在 conflictWaiter 上，按钮点击后以对应决定 resolve。
+  let conflictWaiter = null;
+  (function hookConflictButtons() {
+    const map = {
+      conflictOverwrite: "overwrite",
+      conflictSkip: "skip",
+      conflictOverwriteAll: "overwriteAll",
+      conflictSkipAll: "skipAll",
+    };
+    for (const [id, decision] of Object.entries(map)) {
+      const btn = document.getElementById(id);
+      if (!btn) continue;
+      btn.onclick = () => {
+        const w = conflictWaiter;
+        if (!w) return;
+        conflictWaiter = null;
+        $("conflictModal").classList.add("hidden");
+        w(decision);
+      };
+    }
+    // Esc / 点遮罩 = 跳过单个（保守默认：不确定就不覆盖）
+  })();
+
+  // showConflictDialog 弹出确认框，返回 Promise<'overwrite' | 'skip'>。
+  // 整批取消（进度卡取消按钮）时自动按跳过收场，避免 worker 被框永久卡住。
+  function showConflictDialog(key, info) {
+    return new Promise((resolve) => {
+      $("conflictKey").textContent = key;
+      $("conflictKey").title = key;
+      const infoEl = $("conflictInfo");
+      const size = info && info.size;
+      const modified = info && info.modified;
+      if ((size || modified) && infoEl) {
+        const parts = [];
+        if (size) parts.push(I18N.t("conflict.existingSize", { n: formatSize(size) }));
+        if (modified) parts.push(I18N.t("conflict.existingTime", { t: fmtTime(modified) }));
+        infoEl.textContent = parts.join(" · ");
+        infoEl.classList.remove("hidden");
+      } else if (infoEl) {
+        infoEl.classList.add("hidden");
+      }
+      $("conflictModal").classList.remove("hidden");
+
+      conflictWaiter = (decision) => {
+        // "全部X"先记忆再按单文件决定返回，后续冲突不再弹框
+        if (decision === "overwriteAll") conflictMode = "overwriteAll";
+        if (decision === "skipAll") conflictMode = "skipAll";
+        resolve(decision === "overwriteAll" || decision === "overwrite" ? "overwrite" : "skip");
+      };
+
+      // 看门狗：整批取消时自动按跳过收场，避免 worker 被框永久卡住；
+      // 按钮解决后 conflictWaiter 为 null，看门狗自清退出。
+      // 用递归 setTimeout（与 waitForUploadTask 同理：沙箱只保证 setTimeout，
+      // 且单次检查耗时不会导致回调堆积）。
+      let watchTimer = 0;
+      const watch = () => {
+        if (!conflictWaiter) return; // 已被按钮解决，自清退出
+        if (OB.shared.dl.cancelled) {
+          const w = conflictWaiter;
+          conflictWaiter = null;
+          $("conflictModal").classList.add("hidden");
+          w("skip");
+          return;
+        }
+        watchTimer = setTimeout(watch, 200);
+      };
+      watch();
+    });
+  }
+
+  // askConflict 冲突决定入口：串行化 + 记忆。返回 Promise<'overwrite' | 'skip'>。
+  function askConflict(key, info) {
+    // 快速路径：无排队竞争时直接套用已有决定
+    if (conflictMode === "overwriteAll") return Promise.resolve("overwrite");
+    if (conflictMode === "skipAll") return Promise.resolve("skip");
+    const p = conflictChain.then(() => {
+      // **轮到自己时**再查一次记忆：多文件并发下，冲突在用户点"全部X"之前
+      // 就已入队（askConflict 被调用时记忆还是空）。若在这里不复查，
+      // 排队中的冲突会二次弹框——决定只对第一个生效（本 PR 测试抓过这个 bug）。
+      if (conflictMode === "overwriteAll") return "overwrite";
+      if (conflictMode === "skipAll") return "skip";
+      return showConflictDialog(key, info);
+    });
+    // 吞掉链上异常，保证后续冲突仍能弹框（链本身不该断）
+    conflictChain = p.then(() => {}, () => {});
+    return p;
+  }
+
   // pinUploadContext 在批次开始时钉住上传目标上下文。
   //
   // 为什么必须钉住：进度卡只是右下角浮动卡片（styles.css .dl-card，position:fixed），
@@ -615,7 +723,7 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     };
   }
 
-  // uploadOneFile 上传单个文件，返回 {ok, key, error}
+  // uploadOneFile 上传单个文件，返回 {ok, key, error, skipped?}
   //
   // ctx：由 pinUploadContext 钉住的目标上下文（bucket/prefix/storageClass），
   //      整批共用，不随用户中途导航而变。
@@ -625,16 +733,40 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   //                                  否则 3 个 worker 抢写同一张进度卡会互相覆盖成乱跳的数字。
   //   onUploading(name)              进入第二跳（上云）时回调一次。
   //   onCloudProgress(sent,total)    第二跳的真实云端字节进度（来自后端事件/轮询）。
+  //   onConflict(key,info)           目标已存在时的冲突决定回调，返回
+  //                                  Promise<'overwrite' | 'skip'>。**省略时按旧行为
+  //                                  直接覆盖（fail-open）**——检测是体验增强不是门槛。
   async function uploadOneFile(f, key, ctx, hooks) {
     const h = hooks || {};
     let uploadId = null;
     const emit = (w, t) => { if (h.onProgress) h.onProgress(w, t); };
     try {
-      const beg = await OB.invoke("upload/begin", {
+      let beg = await OB.invoke("upload/begin", {
         bucket: ctx.bucket, path: key, size: f.size, mime: f.type || "",
         storageClass: ctx.storageClass,
       });
+      // 目标已存在：交冲突回调决定。跳过则此文件一个字节都不传。
+      // 未提供回调时按旧行为放行（覆盖）——保持向后兼容，见 hooks.onConflict 注释。
+      if (beg.exists) {
+        let decision = "overwrite";
+        if (h.onConflict) {
+          decision = await h.onConflict(key, beg);
+        }
+        if (decision !== "overwrite") {
+          return { ok: true, skipped: true, key };
+        }
+        beg = await OB.invoke("upload/begin", {
+          bucket: ctx.bucket, path: key, size: f.size, mime: f.type || "",
+          storageClass: ctx.storageClass, overwrite: true,
+        });
+      }
       uploadId = beg.uploadId;
+      // 防御：既无 uploadId 又非续传时，chunk 循环会因 offset 永不推进而空转
+      //（反向验证冲突测试时真实暴露过）。begin 的正常回包必带 uploadId，
+      // 缺失说明前后端状态错位（如 dev 下只热重载了一侧），报错优于挂死。
+      if (!uploadId && !beg.resumed) {
+        throw new Error(I18N.t("upload.beginNoId"));
+      }
       // 后端返回已写入字节数：从断点继续
       let offset = (typeof beg.offset === "number" && beg.offset > 0) ? beg.offset : 0;
       if (beg.resumed && offset > 0) {
@@ -718,7 +850,10 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
 
     // 整批共用一份钉住的上下文：期间用户导航不会改变文件去向。
     const ctx = pinUploadContext();
+    // 冲突记忆每批重置：上一次上传的"全部覆盖"不该污染下一次
+    conflictMode = "";
     const done = [];
+    const skipped = [];
     const failed = [];
     let cancelled = false;
 
@@ -739,11 +874,14 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
             dlProgress(sent, total);
           }
         },
+        onConflict: (key, info) => askConflict(key, info),
       });
       if (OB.shared.dl.cancelled) {
         cancelled = true;
-      } else if (res.ok) {
+      } else if (res.ok && !res.skipped) {
         done.push(res.key);
+      } else if (res.ok && res.skipped) {
+        skipped.push(res.key);
       } else {
         failed.push({ f, key: res.key, error: res.error });
       }
@@ -789,11 +927,13 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
               uploading++;
               renderSummary();
             },
+            onConflict: (key, info) => askConflict(key, info),
           });
           // 只有真正进入过上云阶段的文件才需要递减；
           // 在分片阶段就失败/取消的文件从未计数，减了会变负。
           if (inCloudPhase) uploading = Math.max(0, uploading - 1);
-          if (res.ok) done.push(res.key);
+          if (res.ok && !res.skipped) done.push(res.key);
+          else if (res.ok && res.skipped) skipped.push(res.key);
           else failed.push({ f, key: res.key, error: res.error });
           finished++;
           OB.dlProgressItems(finished, files.length);
@@ -821,8 +961,16 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
         $("dlMsg").textContent += " · " + I18N.t("dl.retryHint", { n: OB.shared.uploadRetryFiles.length });
         retryEl.classList.remove("hidden");
       }
-      OB.setStatus(I18N.t("upload.summary", { ok: done.length, fail: failed.length })
+      const sum = skipped.length
+        ? I18N.t("upload.summarySkip", { ok: done.length, skip: skipped.length, fail: failed.length })
+        : I18N.t("upload.summary", { ok: done.length, fail: failed.length });
+      OB.setStatus(sum
         + " · " + I18N.t("upload.fail") + first.key + ": " + first.error, true);
+    } else if (skipped.length) {
+      // 全部/部分跳过：不算失败也不算成功，如实汇总
+      const text = I18N.t("upload.summarySkip", { ok: done.length, skip: skipped.length, fail: 0 });
+      OB.finishDlCard(text);
+      OB.setStatus(text);
     } else {
       const last = done[done.length - 1];
       const text = done.length > 1 ? I18N.t("upload.doneMulti", { n: done.length }) : I18N.t("upload.done") + last;
@@ -831,11 +979,13 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
     }
     // 记入任务中心（B1）：上传只记录（File 句柄不可持久化，重试靠会话内 dlRetry 按钮）
     // bucket 取钉住的 ctx：文件实际传到了那里，与用户此刻在哪无关。
+    // 跳过的文件也记录（skip 计数），让任务历史如实反映"有 N 个没传"。
     OB.recordTask({
       type: "upload",
       bucket: ctx.bucket,
-      keys: done.concat(failed.map((x) => x.key)),
+      keys: done.concat(skipped, failed.map((x) => x.key)),
       ok: done.length,
+      skipped: skipped.length,
       failed: failed.map((x) => ({ key: x.key, error: x.error })),
       cancelled,
     });

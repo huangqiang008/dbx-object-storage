@@ -305,6 +305,21 @@
     </div>
   </div>
 
+  <!-- 上传冲突确认（issue #11 第三批）：目标对象已存在时决定覆盖或跳过 -->
+  <div id="conflictModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" id="conflictTitle" data-i18n="conflict.title">目标已存在</div>
+      <div class="modal-msg" id="conflictKey"></div>
+      <div class="modal-detail hidden" id="conflictInfo"></div>
+      <div class="modal-foot conflict-foot">
+        <button id="conflictSkipAll" type="button" data-i18n="conflict.skipAll">全部跳过</button>
+        <button id="conflictSkip" type="button" data-i18n="conflict.skip">跳过</button>
+        <button id="conflictOverwriteAll" type="button" data-i18n="conflict.overwriteAll">全部覆盖</button>
+        <button id="conflictOverwrite" type="button" class="primary" data-i18n="conflict.overwrite">覆盖</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 对象元数据编辑（2.1）：Content-Type / Content-Disposition / Cache-Control / 自定义 meta / 标签 -->
   <div id="metaModal" class="modal hidden">
     <div class="modal-box">

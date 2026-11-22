@@ -559,6 +559,17 @@ body {
   gap: 10px;
   margin-top: 16px;
 }
+/* 上传冲突弹框的 4 按钮：空间不够时 2×2 折行，主操作（覆盖）置右下 */
+.modal-foot.conflict-foot {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+@media (max-width: 360px) {
+  .modal-foot.conflict-foot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}
 .modal-foot button {
   background: var(--color-background, #fff);
   color: var(--color-foreground, #18181b);
