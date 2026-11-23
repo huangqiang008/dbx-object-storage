@@ -58,6 +58,14 @@ func parseS3Endpoint(raw string) (endpoint string, secure bool, err error) {
 	return s, secure, nil
 }
 
+// s3NeedsVirtualHost 判断端点是否属于「仅支持/以虚拟主机式为主」的云端 S3。
+// COS 自 2024-01-01 起新建桶仅支持 virtual-hosted-style（issue #15），OBS 亦以
+// 虚拟主机式为主。按端点后缀识别（xxx.myqcloud.com / xxx.myhuaweicloud.com），
+// 无论 provider 预设选的是具体厂商还是通用 s3 都能命中。
+func s3NeedsVirtualHost(endpoint string) bool {
+	return strings.HasSuffix(endpoint, ".myqcloud.com") || strings.HasSuffix(endpoint, ".myhuaweicloud.com")
+}
+
 func newS3Driver(cfg ConnConfig) (StorageDriver, error) {
 	endpoint, secure, err := parseS3Endpoint(cfg.Endpoint)
 	if err != nil {
@@ -80,8 +88,20 @@ func newS3Driver(cfg ConnConfig) (StorageDriver, error) {
 	if cfg.Region.String() != "" {
 		opts.Region = cfg.Region.String()
 	}
-	if cfg.PathStyle {
+	// 寻址风格三选一（issue #15）：
+	//   显式 pathStyle   → path-style（用户显式选择，如老桶 MinIO 部署，以用户为准）
+	//   云端虚拟主机式端点 → virtual-hosted-style：COS 自 2024-01-01 起新建桶仅支持
+	//   虚拟主机式，path-style 直接报 "must be addressed using cos virtual-styled
+	//   domain"；OBS 同样以虚拟主机式为主。minio-go 的 Auto 对非 Amazon 端点一律
+	//   path-style，覆盖不到这类云，按端点后缀识别——provider 标签归一化成 s3 后
+	//   已丢失具体厂商，只有端点可靠。
+	//   其余             → 维持 minio-go Auto：AWS 端点自动虚拟主机式，
+	//   MinIO 自建端点 path-style（行为不变）。
+	switch {
+	case cfg.PathStyle:
 		opts.BucketLookup = minio.BucketLookupPath
+	case s3NeedsVirtualHost(endpoint):
+		opts.BucketLookup = minio.BucketLookupDNS
 	}
 	cl, err := minio.New(endpoint, &opts)
 	if err != nil {
