@@ -10,3 +10,6 @@ backend/*.exe
 store-submission/
 # 助手工作区（日志 / 临时脚本，不入库）
 .workbuddy/
+
+# Penpot 设计源文件（本地设计稿，不入库）
+/*.pen
