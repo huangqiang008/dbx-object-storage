@@ -1046,6 +1046,17 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
   };
 
   OB.doRefresh = function doRefresh() {
+    // 重试语义：导航到新位置失败后（列表报错空态），重试不应重复同一个注定失败的
+    // 请求——那只会换个 request id 再弹一次同样的错误，界面永远回不去。改为回退到
+    // 最后一次成功的目录（lastGoodLoc）；当前位置与基线一致时（初始加载失败、或
+    // 回退目标本身也失败）维持原地重试，天然不会形成回退循环。
+    const good = OB.shared.lastGoodLoc;
+    if (good && (OB.state.bucket !== good.bucket || OB.state.prefix !== good.prefix)) {
+      OB.state.bucket = good.bucket;
+      OB.state.prefix = good.prefix;
+      OB.state.search = "";
+      OB.els.searchInput.value = "";
+    }
     OB.resetPaging();
     OB.loadPage("");
   };

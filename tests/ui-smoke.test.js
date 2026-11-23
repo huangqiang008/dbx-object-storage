@@ -151,6 +151,8 @@ function loadUI() {
   // 模拟云端已存在的对象集合（"bucket/key"）。begin 据此返回 exists 冲突标记，
   // complete 成功后把对象写入集合——行为与真实对象存储的覆盖语义一致。
   const cloudObjects = new Set();
+  // 可由测试按 method 覆盖假后端行为（如让 buckets/list 抛错模拟 RAM 拒绝）
+  const backendOverrides = {};
   const win = {
     document: doc,
     // opaque origin 下 clipboard API 通常不可用 → 走宿主桥
@@ -171,6 +173,8 @@ function loadUI() {
       copy: async (t) => { invocations.push({ method: "__copy", text: t }); },
       invoke: async (method, params) => {
         invocations.push({ method, params });
+        const ov = backendOverrides[method];
+        if (ov) return ov(params);
         return mockBackend(method, params);
       },
       readAssetUrl: async (p) => "blob:" + p,
@@ -325,6 +329,7 @@ function loadUI() {
   return {
     win: sandbox, doc, invocations, registry, scripts,
     uploadLog, uploadState, taskState, cloudObjects,
+    backendOverrides,
     // 让测试控制"上云"持续几轮轮询（默认 0 = 立即完成）
     setCloudTicks: (n) => { uploadCloudTicks = n; },
     // 预置云端已存在的对象：begin 未声明 overwrite 时将命中冲突
@@ -851,4 +856,52 @@ test("上传冲突：全部覆盖即时应用到仍在排队的冲突", async ()
     + "（若为 1，说明排队中的冲突没有即时应用已做的决定，会二次弹框）");
   const completes = uploadLog.filter((c) => c.method === "upload/complete");
   assert.strictEqual(completes.length, 3, "三个文件都应完成上传");
+});
+
+test("重试回退：导航到打不开的位置后，重试回到最后成功的目录（回归：点面包屑桶名进全桶列表被拒后界面卡死）", async () => {
+  const { win, backendOverrides } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  // 模拟线上故障现场：桶内列举正常，账号级 ListBuckets（全桶列表）被 RAM 拒绝。
+  backendOverrides["buckets/list"] = async () => {
+    throw new Error("列举存储桶失败: oss: service returned error: AccessDenied");
+  };
+  OB.state.connected = true;
+  OB.state.bucket = "cxt-static-dev";
+  OB.state.prefix = "02601/";
+
+  // 1) 正常进入目录：首页成功后记录位置基线
+  //    （vm 沙箱对象与测试 realm 原型不同，deepStrictEqual 会误报，逐字段比）
+  await OB.loadPage("");
+  assert.strictEqual(OB.shared.lastGoodLoc && OB.shared.lastGoodLoc.bucket,
+    "cxt-static-dev", "首页成功后应记录 bucket 基线");
+  assert.strictEqual(OB.shared.lastGoodLoc && OB.shared.lastGoodLoc.prefix,
+    "02601/", "首页成功后应记录 prefix 基线");
+  assert.strictEqual(OB.state.loadError, "");
+
+  // 2) 点面包屑左侧桶图标进「全部存储桶」（等价 handler：bucket 清空 →
+  //    resetPaging → loadPage；桶名 crumb 现在改为回桶根目录，不再触发此路径）
+  //    → buckets/list 被拒 → 报错空态
+  OB.state.bucket = "";
+  OB.state.prefix = "";
+  OB.state.search = "";
+  OB.resetPaging();
+  await OB.loadPage("");
+  assert.ok(OB.state.loadError, "全桶列表应处于报错态");
+  assert.strictEqual(OB.state.items.length, 0, "失败目录不应残留旧列表");
+
+  // 3) 点重试：不重复必败请求，回退到最后成功的目录并恢复列表
+  OB.doRefresh();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(OB.state.bucket, "cxt-static-dev", "重试应回退到基线 bucket");
+  assert.strictEqual(OB.state.prefix, "02601/", "重试应回退到基线 prefix");
+  assert.strictEqual(OB.state.loadError, "", "回退后报错应清除");
+  assert.ok(OB.state.items.length > 0, "界面应恢复出对象列表");
+
+  // 4) 基线位置本身也失败（如断网）时：位置与基线一致 → 原地重试，不形成回退循环
+  backendOverrides["objects/list"] = async () => { throw new Error("network down"); };
+  OB.doRefresh();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(OB.state.loadError, "基线也失败应如实报错");
+  assert.strictEqual(OB.state.bucket, "cxt-static-dev", "仍停留在基线位置等待下一次重试");
 });

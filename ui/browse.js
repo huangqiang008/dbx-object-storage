@@ -28,6 +28,11 @@
   // 把上一个目录的数据渲染出来（搜索 + 快速切换目录即可复现）。
   OB.shared.listGen = 0;
 
+  // 最后一次「首页加载成功」的位置（bucket+prefix）。重试按钮据此回退：
+  // 导航到新位置失败后（如点面包屑桶名进入全桶列表被拒），重试不应重复
+  // 同一个注定失败的请求，而应回到最后成功的目录。enterBrowser 换连接时重置。
+  OB.shared.lastGoodLoc = null;
+
   // invalidateList 作废当前所有在途列表请求（切目录/改搜索/刷新时调用）
   OB.invalidateList = function invalidateList() {
     OB.shared.listGen++;
@@ -110,6 +115,9 @@
       OB.refreshAcl();
       // 首页加载成功后记录最近访问（fire-and-forget，失败静默）
       if (!marker) void OB.rememberRecent();
+      // 首页成功即更新位置基线（buckets 分支与 objects 分支都走这里），
+      // 作为后续「重试回退到上一正常目录」的目标
+      if (!marker) OB.shared.lastGoodLoc = { bucket: OB.state.bucket, prefix: OB.state.prefix };
       OB.setStatus(OB.state.hasMore
         ? I18N.t("status.loadedMore", { n: OB.state.items.length })
         : I18N.t("status.loaded", { n: OB.state.items.length }));
@@ -217,7 +225,12 @@
     if (!OB.state.bucket) {
       html = `<span class="crumb root">${I18N.t("breadcrumb.allBuckets")}</span>`;
     } else {
-      html = `<span class="crumb root" data-bucket="">oss://${esc(OB.state.bucket)}/</span>`;
+      // 桶名 crumb 显示的就是 oss://桶名/ 这条路径，点击语义应为「回桶根目录」，
+      // 而不是跳全桶列表——受限凭证（RAM 仅授权特定桶，无 oss:ListBuckets）下
+      // ListBuckets 必然 403，等于每次点桶名都撞一次报错。全桶列表入口保留在
+      // 左侧桶图标上（tooltip 为「全部存储桶」）。
+      html = `<span class="crumb root" data-allbuckets="" title="${esc(I18N.t("breadcrumb.allBuckets"))}">${svg("bucket", 13)}</span>`
+           + `<span class="crumb root" data-bucketroot="">oss://${esc(OB.state.bucket)}/</span>`;
       const parts = OB.state.prefix ? OB.state.prefix.replace(/\/$/, "").split("/").filter(Boolean) : [];
       let acc = "";
       const crumbs = parts.map((p) => { acc += p + "/"; return { label: p, prefix: acc }; });
@@ -235,9 +248,20 @@
       }
     }
     OB.els.breadcrumb.innerHTML = html;
-    OB.els.breadcrumb.querySelectorAll(".crumb[data-bucket]").forEach((el) => {
+    // 桶名 crumb：回桶根目录（清 prefix，bucket 保持不变）
+    OB.els.breadcrumb.querySelectorAll(".crumb[data-bucketroot]").forEach((el) => {
       el.onclick = () => {
-        OB.state.bucket = el.getAttribute("data-bucket");
+        OB.state.prefix = "";
+        OB.state.search = "";
+        OB.els.searchInput.value = "";
+        OB.resetPaging();
+        OB.loadPage("");
+      };
+    });
+    // 桶图标：回「全部存储桶」列表（旧版桶名 crumb 的行为）
+    OB.els.breadcrumb.querySelectorAll(".crumb[data-allbuckets]").forEach((el) => {
+      el.onclick = () => {
+        OB.state.bucket = "";
         OB.state.prefix = "";
         OB.state.search = "";
         OB.els.searchInput.value = "";
