@@ -637,6 +637,57 @@ test("单文件上传：进入上云阶段切不确定态，完成后清除", as
   assert.strictEqual(fillAfter.style.width, "100%", "完成后填充条应为 100%");
 });
 
+test("多文件上传：进度随分片字节推进，不必等第一个文件落地（回归 3 大文件 0%）", async () => {
+  const { win, setCloudTicks } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  // 上云阶段只需 1 轮 status（约 1 秒）就结束：
+  // 采样点在第 3 个 chunk 之后、任何文件落地之前，此时进度必须已 > 0。
+  setCloudTicks(1);
+
+  OB.state.connected = true;
+  OB.state.readOnly = false;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "";
+
+  // 包装 invoke：前 3 个 upload/chunk 发完后立刻采样进度条。
+  // 此刻第一跳字节已上报，但没有任何文件完成——旧实现这里仍是 0%。
+  const rawInvoke = OB.invoke;
+  let chunkCount = 0;
+  let pctAfterChunks = null;
+  OB.invoke = function (method, params, opts) {
+    const ret = rawInvoke(method, params, opts);
+    if (method === "upload/chunk") {
+      chunkCount++;
+      if (chunkCount === 3) {
+        // emit(offset) 在 uploadOneFile 的 await 返回之后才执行，
+        // 故下一 tick 再采样进度条，否则读到的还是 chunk 前的 0%。
+        setTimeout(() => {
+          const pct = win.document.getElementById("dlPct");
+          pctAfterChunks = pct ? pct.textContent : null;
+        }, 0);
+      }
+    }
+    return ret;
+  };
+
+  const files = [makeFile("big1.bin", 1000), makeFile("big2.bin", 1000), makeFile("big3.bin", 1000)];
+  OB.els.fileInput.files = files;
+  const uploadPromise = OB.els.fileInput.onchange();
+
+  // 等采样点到达（3 个 chunk 已发），此时上云还在转，上传未完成。
+  for (let i = 0; i < 100 && pctAfterChunks === null; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.ok(pctAfterChunks !== null, "测试前提：应采样到 3 个 chunk 后的进度");
+  const pctNum = parseInt(pctAfterChunks, 10);
+  assert.ok(pctNum > 0,
+    `分片字节已写入后进度应 > 0%，实际 ${pctAfterChunks}——`
+    + "多文件进度必须随字节推进，而不是等整个文件（含上云）落地才 +1");
+
+  await Promise.race([uploadPromise, new Promise((r) => setTimeout(r, 5000))]);
+});
+
 test("单文件上传：complete 返回 taskId 后必须轮询到终态才算完成", async () => {
   // 让"上云"阶段需要 2 轮 status 才结束：第 1 轮 running、第 2 轮 done。
   // 若前端拿到 taskId 就当完成（旧行为），status 调用数会是 0。

@@ -899,6 +899,30 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
       let finished = 0;
       let uploading = 0; // 已写完分片、正在上云的文件数
 
+      // 多文件字节级进度汇总（issue #11 体验修复）：
+      // 每个 worker 只写自己那格 progress[i]，renderProgress 汇总后统一刷那张卡。
+      // 这样既避免 3 个 worker 抢写导致数字乱跳（原先砍掉字节上报的原因），
+      // 又不会让大文件在第一个落地前进度条一直停在 0%——后者曾让人以为卡死。
+      //
+      // 权重：分片（第一跳，快）与真实上云（第二跳，慢）各占 1/2。
+      // 上云字节才是耗时主体，等权能反映真实耗时；仅分片阶段时进度最多到 50%。
+      const perFile = files.map((f) => ({ size: f.size > 0 ? f.size : 1, part: 0, cloud: 0 }));
+      const renderProgress = () => {
+        let sum = 0;
+        for (let i = 0; i < perFile.length; i++) {
+          const p = perFile[i];
+          sum += (p.part + p.cloud) / 2;
+        }
+        const pct = Math.min(100, (sum / perFile.length) * 100);
+        const fill = $("dlFill");
+        if (fill) fill.style.width = pct.toFixed(1) + "%";
+        const pctEl = $("dlPct");
+        if (pctEl) pctEl.textContent = pct.toFixed(0) + "%";
+        const bytesEl = $("dlBytes");
+        if (bytesEl) bytesEl.textContent = I18N.t("upload.progress", { n: finished, m: files.length });
+        OB.shared.dl.lastT = 0; // 多文件不用速率（worker 交替），避免残留基准算错
+      };
+
       const renderSummary = () => {
         const msg = $("dlMsg");
         if (msg) {
@@ -914,14 +938,22 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
           if (i >= files.length) return;
           const f = files[i];
           const key = uploadTargetKey(f, ctx);
+          const pf = perFile[i];
           // 当前项显示文件名（并发下多个文件交替，显示的是最近开始的那个）
           $("dlName").textContent = f.name;
           $("dlName").title = f.name;
-          // 省略 onProgress：并发下不做字节级上报，避免抢写同一张卡；
-          // 进度由下方 dlProgressItems 按「项」推进（只在文件真正传完后 +1）。
-          // onUploading 在进入上云阶段时被调用一次，用于统计在途上云文件数。
           let inCloudPhase = false;
           const res = await uploadOneFile(f, key, ctx, {
+            // 第一跳：分片写本地临时文件的字节数
+            onProgress: (written) => {
+              pf.part = Math.min(1, written / pf.size);
+              renderProgress();
+            },
+            // 第二跳：真实云端字节数（后端事件/轮询）。total<=0 时该阶段记满。
+            onCloudProgress: (sent, total) => {
+              pf.cloud = total > 0 ? Math.min(1, sent / total) : 1;
+              renderProgress();
+            },
             onUploading: () => {
               inCloudPhase = true;
               uploading++;
@@ -932,11 +964,13 @@ if (dlRetryEl) dlRetryEl.onclick = () => {
           // 只有真正进入过上云阶段的文件才需要递减；
           // 在分片阶段就失败/取消的文件从未计数，减了会变负。
           if (inCloudPhase) uploading = Math.max(0, uploading - 1);
+          // 终态：该文件的两格都记满（跳过/失败也计入完成，只是不计入 done）
+          pf.part = 1; pf.cloud = 1;
           if (res.ok && !res.skipped) done.push(res.key);
           else if (res.ok && res.skipped) skipped.push(res.key);
           else failed.push({ f, key: res.key, error: res.error });
           finished++;
-          OB.dlProgressItems(finished, files.length);
+          renderProgress();
           renderSummary();
         }
       };
