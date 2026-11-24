@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -60,10 +61,19 @@ func parseS3Endpoint(raw string) (endpoint string, secure bool, err error) {
 
 // s3NeedsVirtualHost 判断端点是否属于「仅支持/以虚拟主机式为主」的云端 S3。
 // COS 自 2024-01-01 起新建桶仅支持 virtual-hosted-style（issue #15），OBS 亦以
-// 虚拟主机式为主。按端点后缀识别（xxx.myqcloud.com / xxx.myhuaweicloud.com），
-// 无论 provider 预设选的是具体厂商还是通用 s3 都能命中。
+// 虚拟主机式为主。按主机名识别（而非原始端点字符串），因为端点可能带端口、
+// 大小写或末尾点；provider 标签归一化成 s3 后已丢失厂商信息，只有端点可靠。
 func s3NeedsVirtualHost(endpoint string) bool {
-	return strings.HasSuffix(endpoint, ".myqcloud.com") || strings.HasSuffix(endpoint, ".myhuaweicloud.com")
+	host := endpoint
+	// parseS3Endpoint 已去掉 scheme，但保留端口（帮助文本允许用户填端口）。
+	// 用 // 前缀让 url.Parse 按 authority 解析，再由 Hostname() 去掉端口。
+	if u, err := url.Parse("//" + endpoint); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.HasSuffix(host, ".myqcloud.com") ||
+		strings.HasSuffix(host, ".tencentcos.cn") ||
+		strings.HasSuffix(host, ".myhuaweicloud.com")
 }
 
 func newS3Driver(cfg ConnConfig) (StorageDriver, error) {

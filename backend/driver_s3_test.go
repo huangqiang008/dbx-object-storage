@@ -39,6 +39,12 @@ func TestS3BucketLookupStyle(t *testing.T) {
 	}{
 		{"COS 端点默认虚拟主机式（issue #15 主场景）", "cos.ap-guangzhou.myqcloud.com", false, minio.BucketLookupDNS},
 		{"COS 端点显式 pathStyle 以用户为准", "cos.ap-guangzhou.myqcloud.com", true, minio.BucketLookupPath},
+		{"COS 端点带端口仍走虚拟主机式", "cos.ap-guangzhou.myqcloud.com:443", false, minio.BucketLookupDNS},
+		{"COS 端点带 scheme 与端口仍走虚拟主机式", "https://cos.ap-guangzhou.myqcloud.com:443", false, minio.BucketLookupDNS},
+		{"COS tencentcos.cn 主域名走虚拟主机式", "cos.ap-guangzhou.tencentcos.cn", false, minio.BucketLookupDNS},
+		{"COS tencentcos.cn 内网域名走虚拟主机式", "cos-internal.ap-guangzhou.tencentcos.cn", false, minio.BucketLookupDNS},
+		{"COS 域名大小写不敏感", "COS.AP-GUANGZHOU.MYQCLOUD.COM", false, minio.BucketLookupDNS},
+		{"COS 域名末尾点（绝对 FQDN）也命中", "cos.ap-guangzhou.myqcloud.com.", false, minio.BucketLookupDNS},
 		{"OBS 端点默认虚拟主机式", "obs.cn-north-1.myhuaweicloud.com", false, minio.BucketLookupDNS},
 		{"通用 s3 形状的内网 COS 域名也命中", "cos-internal.ap-guangzhou.myqcloud.com", false, minio.BucketLookupDNS},
 		{"MinIO 自建 IP 维持 Auto（实际走 path-style）", "192.168.1.10:9000", false, minio.BucketLookupAuto},
