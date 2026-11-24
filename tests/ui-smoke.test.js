@@ -43,6 +43,9 @@ class StubElement {
     this.scrollTop = 0;
     this.clientHeight = 400;
     this.clientWidth = 800;
+    // 默认不解析 innerHTML（多数断言只看原始字符串）。面包屑等需要验证
+    // 事件绑定的元素按需开启，以便 querySelectorAll 能找到 innerHTML 里的节点。
+    this.parseInnerHTML = false;
   }
   get classList() {
     const self = this;
@@ -55,7 +58,22 @@ class StubElement {
   }
   set className(v) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
   get className() { return [...this._classes].join(" "); }
-  set innerHTML(v) { this._html = String(v); }
+  set innerHTML(v) {
+    this._html = String(v);
+    if (this.parseInnerHTML) {
+      this.children = [];
+      // 面包屑只由简单 <span class=... data-...> 组成，解析出 class/data 属性即可。
+      const re = /<span\b([^>]*)>([\s\S]*?)<\/span>/g;
+      for (const m of this._html.matchAll(re)) {
+        const el = new StubElement("span");
+        const cls = /class="([^"]*)"/.exec(m[1]);
+        if (cls) el.className = cls[1];
+        for (const a of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) el.setAttribute(a[1], a[2]);
+        el.textContent = m[2].replace(/<[^>]*>/g, "");
+        this.children.push(el);
+      }
+    }
+  }
   get innerHTML() { return this._html; }
   appendChild(c) { this.children.push(c); return c; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
@@ -71,11 +89,28 @@ class StubElement {
   querySelectorAll(sel) { return this.query(sel); }
   query(sel) {
     const out = [];
-    const want = sel.replace(/^[.#]/, "");
-    const isClass = sel.startsWith(".");
+    const s = String(sel || "").trim().replace(/^:scope\s*>\s*/, "");
+    // 支持 .class / #id / tag / [attr] / [attr="v"] 的任意组合，
+    // 例如 .crumb[data-bucketroot]、img.pv-img、.row[data-i="3"]。
+    const parts = [];
+    const re = /([#.])?([\w-]+)|\[([\w-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\]]+)))?\]/g;
+    for (const m of s.matchAll(re)) {
+      if (m[3]) parts.push({ attr: m[3], value: m[4] ?? m[5] ?? m[6] });
+      else if (m[1] === "#") parts.push({ id: m[2] });
+      else if (m[1] === ".") parts.push({ cls: m[2] });
+      else parts.push({ tag: m[2] });
+    }
+    if (!parts.length) return out;
+    const match = (el) => parts.every((p) => {
+      if (p.id !== undefined) return el.id === p.id;
+      if (p.cls !== undefined) return el._classes.has(p.cls);
+      if (p.tag !== undefined) return el.tagName.toLowerCase() === p.tag.toLowerCase();
+      if (!el.hasAttribute(p.attr)) return false;
+      return p.value === undefined || el.getAttribute(p.attr) === p.value;
+    });
     const walk = (n) => {
       for (const c of n.children) {
-        if (isClass ? c._classes.has(want) : c.id === want) out.push(c);
+        if (match(c)) out.push(c);
         walk(c);
       }
     };
@@ -118,6 +153,9 @@ function buildDom(html) {
 function loadUI() {
   const html = fs.readFileSync(path.join(UI, "index.html"), "utf8");
   const { registry } = buildDom(html);
+  // 面包屑需要在测试里点击 crumb，开启 innerHTML → 子元素解析。
+  const bcEl = registry.get("breadcrumb");
+  if (bcEl) bcEl.parseInnerHTML = true;
 
   const listeners = {};   // document 级监听
   const doc = {
@@ -859,7 +897,7 @@ test("上传冲突：全部覆盖即时应用到仍在排队的冲突", async ()
 });
 
 test("重试回退：导航到打不开的位置后，重试回到最后成功的目录（回归：点面包屑桶名进全桶列表被拒后界面卡死）", async () => {
-  const { win, backendOverrides } = loadUI();
+  const { win, backendOverrides, invocations } = loadUI();
   await new Promise((r) => setTimeout(r, 50));
   const OB = win.OB;
   // 模拟线上故障现场：桶内列举正常，账号级 ListBuckets（全桶列表）被 RAM 拒绝。
@@ -879,16 +917,20 @@ test("重试回退：导航到打不开的位置后，重试回到最后成功�
     "02601/", "首页成功后应记录 prefix 基线");
   assert.strictEqual(OB.state.loadError, "");
 
-  // 2) 点面包屑左侧桶图标进「全部存储桶」（等价 handler：bucket 清空 →
-  //    resetPaging → loadPage；桶名 crumb 现在改为回桶根目录，不再触发此路径）
-  //    → buckets/list 被拒 → 报错空态
-  OB.state.bucket = "";
-  OB.state.prefix = "";
-  OB.state.search = "";
-  OB.resetPaging();
-  await OB.loadPage("");
+  // 2) 真正点击面包屑左侧桶图标进「全部存储桶」→ buckets/list 被拒 → 报错空态
+  OB.renderBreadcrumb();
+  const allCrumb = OB.els.breadcrumb.querySelector(".crumb[data-allbuckets]");
+  assert.ok(allCrumb, "桶图标 crumb 应渲染且可被选中");
+  invocations.length = 0;
+  allCrumb.onclick();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(invocations.some((i) => i.method === "buckets/list"), "桶图标应触发 ListBuckets");
   assert.ok(OB.state.loadError, "全桶列表应处于报错态");
+  assert.strictEqual(OB.state.bucket, "", "应切到全部存储桶位置");
   assert.strictEqual(OB.state.items.length, 0, "失败目录不应残留旧列表");
+  // 报错后面包屑必须同步到当前位置，不能残留未加载成功的旧桶名
+  assert.ok(!OB.els.breadcrumb.innerHTML.includes("cxt-static-dev"),
+    "报错时面包屑不应残留旧桶名（loadPage 失败分支也要重绘）");
 
   // 3) 点重试：不重复必败请求，回退到最后成功的目录并恢复列表
   OB.doRefresh();
@@ -904,4 +946,37 @@ test("重试回退：导航到打不开的位置后，重试回到最后成功�
   await new Promise((r) => setTimeout(r, 20));
   assert.ok(OB.state.loadError, "基线也失败应如实报错");
   assert.strictEqual(OB.state.bucket, "cxt-static-dev", "仍停留在基线位置等待下一次重试");
+});
+
+test("面包屑：桶名 crumb 回桶根目录且只列对象，桶图标才进全部存储桶", async () => {
+  const { win, invocations } = loadUI();
+  await new Promise((r) => setTimeout(r, 50));
+  const OB = win.OB;
+  OB.state.connected = true;
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "dir/sub/";
+
+  OB.renderBreadcrumb();
+  const bucketCrumb = OB.els.breadcrumb.querySelector(".crumb[data-bucketroot]");
+  const iconCrumb = OB.els.breadcrumb.querySelector(".crumb[data-allbuckets]");
+  assert.ok(bucketCrumb && iconCrumb, "桶名 crumb 与桶图标 crumb 都应渲染且可被选中");
+
+  // 点桶名：保留 bucket、清 prefix，请求的是 objects/list 而非 buckets/list
+  invocations.length = 0;
+  bucketCrumb.onclick();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(OB.state.bucket, "bucket-a", "点桶名不应跳到全部存储桶");
+  assert.strictEqual(OB.state.prefix, "", "点桶名应回桶根目录");
+  assert.ok(invocations.some((i) => i.method === "objects/list"), "点桶名应列对象");
+  assert.ok(!invocations.some((i) => i.method === "buckets/list"), "点桶名不应触发 ListBuckets（受限凭证会 403）");
+
+  // 点桶图标：才进全部存储桶
+  OB.state.bucket = "bucket-a";
+  OB.state.prefix = "dir/sub/";
+  OB.renderBreadcrumb();
+  invocations.length = 0;
+  OB.els.breadcrumb.querySelector(".crumb[data-allbuckets]").onclick();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(OB.state.bucket, "", "点桶图标应进全部存储桶");
+  assert.ok(invocations.some((i) => i.method === "buckets/list"), "点桶图标应触发 ListBuckets");
 });

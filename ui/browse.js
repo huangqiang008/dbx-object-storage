@@ -124,6 +124,9 @@
     } catch (e) {
       if (gen !== OB.shared.listGen) return; // 过期请求的失败不打扰当前视图
       OB.state.loadError = (e && e.message) ? e.message : String(e);
+      // 失败时 state.bucket/prefix 可能刚被导航改掉（如点桶图标进全桶列表被拒），
+      // 面包屑必须同步到当前实际位置，否则会显示一个并未加载成功的目录。
+      OB.renderBreadcrumb();
       OB.setStatus(I18N.t("status.loadFail") + (e && e.message ? e.message : e), true);
     } finally {
       // 只清理自己这一代的状态：避免旧请求的 finally 把新请求的 loading 提前置否
