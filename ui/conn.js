@@ -205,6 +205,9 @@
     if (pb) pb.classList.toggle("on", !!OB.state.showPublicAcl);
     // 首次进入或从连接对话框返回：作废可能在途的旧请求
     OB.invalidateList();
+    // 新连接/重连是新的位置基线：上个会话记录的「最后成功目录」不再有效，
+    // 重置掉，避免新连接首次加载失败时重试回退到旧连接的目录
+    OB.shared.lastGoodLoc = null;
     OB.renderBreadcrumb();
     OB.loadPage("");
   };
